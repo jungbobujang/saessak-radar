@@ -12,6 +12,17 @@ const API_PATH = '/newsac/api/v1/programs/user';
 const DETAIL_API = '/newsac/api/v1/programs';
 const DETAIL_BASE = `${ORIGIN}/public/program/thumb`;
 
+// ---- 사이트 API 스펙 (2026-08 변경 대응) ----------------------------------
+// 사이트가 목록 API 호출에 season(시즌 연도) + version(API 버전) 을 함께 보내도록
+// 바뀌었다. 이 둘이 빠진 호출은 "인증 필요" 로 거절될 수 있으므로 항상 붙인다.
+// - season : 연도가 바뀌면 SEASON_YEAR 환경변수만 교체하면 된다 (코드 수정 불필요)
+// - version: 현재 사이트가 쓰는 값 'v2'. v2 는 지난 시즌 잔여분을 걸러낸
+//            "사이트 화면과 동일한" 모집 목록을 돌려준다.
+const API_VERSION = 'v2';
+function seasonYear() {
+  return String(process.env.SEASON_YEAR || '2026');
+}
+
 // 코드 → 사람이 읽는 값 매핑 (사이트 실제 값 기준)
 const STATUS_MAP = {
   C1101: '모집 예정',
@@ -127,18 +138,24 @@ function mapItem(item) {
 /**
  * 페이지 컨텍스트 안에서 API를 페이지네이션하며 전부 수집한다.
  * (브라우저 세션/헤더/오리진을 그대로 물려받으므로 차단 위험이 낮다.)
+ *
+ * 교육대상(targetCode)·권역·학교급 필터는 일부러 서버에 보내지 않는다.
+ * 전량을 받아 watcher 쪽에서 설정으로 거르는 구조라야
+ *  ① 설정을 바꿔도 재수집이 필요 없고 ② 신설/변경된 분류를 '미분류'로 잡아낼 수 있다.
+ * (모집 상태만 C1101,C1102 로 좁혀 응답량을 줄인다.)
  */
-async function fetchAllInPage(page, apiPath, season) {
+async function fetchAllInPage(page, apiPath, season, version) {
   return await page.evaluate(
-    async ({ apiPath, season }) => {
-      const size = 100;
+    async ({ apiPath, season, version }) => {
+      const size = 100; // 페이지당 최대치. 아래에서 끝까지 순회한다.
       let pageNo = 1;
       let all = [];
       let guard = 0;
       while (guard++ < 50) {
         const url =
           apiPath +
-          `?operationStatusCode=C1101,C1102&page=${pageNo}&size=${size}&season=${season}`;
+          `?operationStatusCode=C1101,C1102&page=${pageNo}&size=${size}` +
+          `&season=${encodeURIComponent(season)}&version=${encodeURIComponent(version)}`;
         const res = await fetch(url, { headers: { Accept: 'application/json' } });
         if (!res.ok) throw new Error('API 응답 오류 status=' + res.status);
         const j = await res.json();
@@ -157,23 +174,8 @@ async function fetchAllInPage(page, apiPath, season) {
       }
       return all;
     },
-    { apiPath, season }
+    { apiPath, season, version }
   );
-}
-
-async function getSeason(page) {
-  try {
-    const year = await page.evaluate(async () => {
-      const r = await fetch('/api/cache/current-season', {
-        headers: { Accept: 'application/json' },
-      });
-      const j = await r.json();
-      return j && j.year ? j.year : null;
-    });
-    return year || String(new Date().getFullYear());
-  } catch {
-    return String(new Date().getFullYear());
-  }
 }
 
 /**
@@ -204,10 +206,10 @@ async function scrape() {
       console.log('[scraper] networkidle 타임아웃 — 계속 진행');
     });
 
-    const season = await getSeason(page);
-    console.log('[scraper] 시즌:', season);
+    const season = seasonYear();
+    console.log(`[scraper] 시즌: ${season} (version=${API_VERSION})`);
 
-    const rawItems = await fetchAllInPage(page, API_PATH, season);
+    const rawItems = await fetchAllInPage(page, API_PATH, season, API_VERSION);
     const cards = rawItems
       .map(mapItem)
       .filter((c) => c.id && c.status && c.status !== '모집 완료');
@@ -259,12 +261,17 @@ async function fetchDetails(programIds) {
     await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
+    // 상세 API 는 현재 season·version 없이도 동일한 응답을 준다(실측 확인).
+    // 다만 목록 API 처럼 언제든 필수가 될 수 있어 같은 파라미터를 함께 보낸다.
     const bodies = await page.evaluate(
-      async ({ apiBase, ids }) => {
+      async ({ apiBase, ids, season, version }) => {
+        const qs = `?season=${encodeURIComponent(season)}&version=${encodeURIComponent(version)}`;
         const out = {};
         for (const pid of ids) {
           try {
-            const r = await fetch(apiBase + '/' + pid, { headers: { Accept: 'application/json' } });
+            const r = await fetch(apiBase + '/' + pid + qs, {
+              headers: { Accept: 'application/json' },
+            });
             out[pid] = r.ok ? await r.json() : { __error: 'status ' + r.status };
           } catch (e) {
             out[pid] = { __error: String(e && e.message ? e.message : e) };
@@ -272,7 +279,7 @@ async function fetchDetails(programIds) {
         }
         return out;
       },
-      { apiBase: DETAIL_API, ids }
+      { apiBase: DETAIL_API, ids, season: seasonYear(), version: API_VERSION }
     );
 
     const result = {};
@@ -301,6 +308,8 @@ module.exports = {
   scrape,
   fetchDetails,
   mapDetail,
+  seasonYear,
+  API_VERSION,
   LIST_URL,
   STATUS_MAP,
   TYPE_MAP,

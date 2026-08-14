@@ -3,10 +3,16 @@
 // ============================================================================
 // 교육대상 분류 단일 소스 (2026 개편 반영)
 // ----------------------------------------------------------------------------
-// newsac.kosac.re.kr 리스트 API 의 targetName 실측값(2026 시즌) 기준:
-//   일반형 / 사회적 배려형(도서벽지) / 사회적 배려형(이주배경(구 다문화)) /
-//   사회적 배려형(특수교육) / 농어촌 학교 / 교육복지우선지원사업 학교
+// newsac.kosac.re.kr 리스트 API 의 targetName / 상세 API 의 target[].codeInfo
+// 실측값(2026 시즌, 코드그룹 G006 "교육대상") 기준:
+//   C0601 일반형
+//   C0602 사회적 배려형(도서벽지)
+//   C0603 사회적 배려형(이주배경(구 다문화))
+//   C0604 사회적 배려형(특수교육)
+//   C0605 농어촌 학교
+//   C0606 교육복지우선지원사업 학교
 //
+// code  : 사이트 필터 코드(G006). 목록 API targetCode 파라미터 값과 동일
 // full  : API 가 실제로 내려주는 정식 라벨(매칭·저장 기준값)
 // short : 대시보드/텔레그램 축약 표기 (툴팁으로 full 노출)
 // aliases: 구(舊) 라벨·짧은 라벨 등 같은 분류로 취급할 표기들(공백 무시 비교)
@@ -14,18 +20,21 @@
 const CATEGORIES = [
   {
     key: 'general',
+    code: 'C0601',
     full: '일반형',
     short: '일반형',
     aliases: ['일반형', '일반'],
   },
   {
     key: 'island',
+    code: 'C0602',
     full: '사회적 배려형(도서벽지)',
     short: '배려형(도서벽지)',
     aliases: ['사회적 배려형(도서벽지)', '도서벽지'],
   },
   {
     key: 'migrant',
+    code: 'C0603',
     full: '사회적 배려형(이주배경(구 다문화))',
     short: '배려형(이주배경)',
     // 구 명칭 '다문화' 및 중간 표기 전부 이주배경으로 흡수
@@ -39,18 +48,21 @@ const CATEGORIES = [
   },
   {
     key: 'special',
+    code: 'C0604',
     full: '사회적 배려형(특수교육)',
     short: '배려형(특수교육)',
     aliases: ['사회적 배려형(특수교육)', '특수교육', '특수'],
   },
   {
     key: 'rural',
+    code: 'C0605',
     full: '농어촌 학교',
     short: '농어촌',
     aliases: ['농어촌 학교', '농어촌학교', '농어촌'],
   },
   {
     key: 'welfare',
+    code: 'C0606',
     full: '교육복지우선지원사업 학교',
     short: '교복우',
     aliases: [
@@ -66,6 +78,13 @@ const UNCLASSIFIED = '미분류';
 
 const BY_KEY = {};
 for (const c of CATEGORIES) BY_KEY[c.key] = c;
+
+// 코드(C06xx) → 카테고리
+const BY_CODE = {};
+for (const c of CATEGORIES) BY_CODE[c.code] = c;
+
+// 사이트 목록 API targetCode 에 넣을 전체 코드 목록 (전량 수집 기준)
+const ALL_TARGET_CODES = CATEGORIES.map((c) => c.code);
 
 // 공백 제거(라벨 표기 흔들림 흡수)
 function stripWs(s) {
@@ -96,6 +115,18 @@ function shortOf(label) {
   return key ? BY_KEY[key].short : String(label == null ? '' : label).trim();
 }
 
+// 코드(C06xx) → 정식 라벨. 모르는 코드는 코드 그대로 보존(미분류 취급).
+function fullOfCode(code) {
+  const c = BY_CODE[String(code || '').trim()];
+  return c ? c.full : String(code == null ? '' : code).trim();
+}
+
+// 라벨 → 코드(C06xx). 모르면 null.
+function codeOf(label) {
+  const key = canonicalKey(label);
+  return key ? BY_KEY[key].code : null;
+}
+
 // 알려진 분류인가?
 function isKnown(label) {
   return canonicalKey(label) != null;
@@ -117,10 +148,14 @@ function normalizeList(arr) {
 
 module.exports = {
   CATEGORIES,
+  BY_CODE,
+  ALL_TARGET_CODES,
   UNCLASSIFIED,
   stripWs,
   canonicalKey,
   canonicalFull,
+  fullOfCode,
+  codeOf,
   shortOf,
   isKnown,
   normalizeList,
