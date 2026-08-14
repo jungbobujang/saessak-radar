@@ -42,7 +42,13 @@ const DEFAULT_SETTINGS = {
   regions: ['서울·인천권'],
   schoolLevels: ['초등학교'],
   statuses: ['모집 예정', '모집 중'],
-  targets: ['일반형', '사회적 배려형(이주배경(구 다문화))'],
+  // 교육대상 기본값 (사이트 실측 코드: C0601 일반형 · C0603 이주배경 · C0606 교육복지우선지원사업 학교)
+  // 저장된 설정이 없을 때(첫 실행·볼륨 유실)만 쓰이는 값이므로, 우리 학교가 해당되는 3종을 모두 넣는다.
+  targets: [
+    '일반형',
+    '사회적 배려형(이주배경(구 다문화))',
+    '교육복지우선지원사업 학교',
+  ],
   intervalMinutes: 10,
   // 알림 유형 토글
   notifyStart: true, // 모집 시작 전환 알림
@@ -78,6 +84,8 @@ function writeJson(file, data) {
 }
 
 // ---- settings ----
+// 저장된 값이 항상 우선이다. 기본값은 ① settings.json 이 아예 없을 때(첫 실행·볼륨 유실)와
+// ② 저장본에 없는 새 필드를 채울 때만 쓰인다. (전개 순서상 s 가 뒤라 기본값을 덮어쓴다)
 function getSettings() {
   const s = readJson(SETTINGS_PATH, null);
   if (!s) {
@@ -86,6 +94,25 @@ function getSettings() {
   }
   // 누락 필드는 기본값으로 보정
   return { ...DEFAULT_SETTINGS, ...s };
+}
+
+// 저장 위치 진단 — 재배포 후 "설정이 초기화됐다" 를 로그만 보고 판별할 수 있게 한다.
+// 볼륨이 안 붙었으면 매 배포마다 settingsExists:false 로 찍힌다.
+function describeStorage() {
+  let writable = true;
+  try {
+    ensureDir();
+    const probe = path.join(DATA_DIR, '.write-probe');
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+  } catch (e) {
+    writable = false;
+  }
+  return {
+    dataDir: path.resolve(DATA_DIR),
+    settingsExists: fs.existsSync(SETTINGS_PATH),
+    writable,
+  };
 }
 
 function saveSettings(partial) {
@@ -231,6 +258,7 @@ module.exports = {
   saveInstitution,
   getSettings,
   saveSettings,
+  describeStorage,
   getState,
   saveState,
   getLog,

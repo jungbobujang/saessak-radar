@@ -1728,6 +1728,23 @@ function pageShell(title, body) {
 // ---- 시작 ----
 app.listen(PORT, () => {
   console.log(`[server] 새싹 레이더 실행 중 → http://localhost:${PORT}`);
+
+  // 저장 위치 진단 — 재배포 후 설정이 초기화됐다면 여기서 바로 원인이 보인다.
+  // settingsExists=false 가 매 배포마다 찍히면 볼륨이 안 붙은 것(= 저장값 유실).
+  try {
+    const st = storage.describeStorage();
+    console.log(
+      `[storage] DATA_DIR=${st.dataDir} · 쓰기가능=${st.writable} · ` +
+        `settings.json=${st.settingsExists ? '기존 저장값 로드' : '없음 → 기본값으로 새로 생성'}`
+    );
+    if (!st.writable) {
+      console.error('[storage] ⚠ 데이터 디렉터리에 쓸 수 없습니다 — 설정이 저장되지 않습니다.');
+    }
+    console.log('[storage] 감시 조건 교육대상:', (storage.getSettings().targets || []).join(', '));
+  } catch (e) {
+    console.error('[storage] 저장 위치 진단 실패:', e.message);
+  }
+
   // 교육대상 분류 개편 이관(멱등) — 저장된 구 분류 라벨을 새 정식 라벨로 정규화
   try {
     migrate();
