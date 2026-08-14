@@ -226,7 +226,7 @@ app.get('/', (req, res) => {
       const hasLink = !!l.link;
       const gonow = hasLink ? '<span class="gonow">↗ 이동</span>' : '';
       // 로그 줄에서는 [운영기관] 프로그램명을 말줄임 처리 (logtitle 에서 ellipsis)
-      const inner = `${badge}
+      const inner = `${badge}${ratingMark(l.institution, s.showRatings)}
         <span class="logtitle">${escapeHtml(instLabel(l.institution, l.title))}</span>
         <span class="logtime">${escapeHtml(time)}</span>
         ${gonow}`;
@@ -374,6 +374,126 @@ app.get('/', (req, res) => {
   `));
 });
 
+// ---- 설정 페이지: 기관 평가 섹션 ----
+// 56개 기관을 아코디언으로 펼쳐 평가하고, 표식 노출 여부(showRatings)를 토글한다.
+function institutionsSection(s) {
+  const list = institutionsCached();
+  const done = list.filter((r) => r.evaluated).length;
+
+  // 접힌 상태 요약: 판정 색점 · ★점수 · 하트
+  const summaryOf = (r) => {
+    if (!r.evaluated) return '<span class="muted small">미평가</span>';
+    const bits = [];
+    if (VERDICT_DOT[r.verdict]) {
+      bits.push(
+        `<span class="vchip v-${r.verdict}">${VERDICT_DOT[r.verdict]} ${VERDICT_LABEL[r.verdict]}</span>`
+      );
+    }
+    if (r.staffScore != null) bits.push(`<span class="isc">★${r.staffScore}</span>`);
+    if (r.heart) bits.push('<span class="ihe">❤️</span>');
+    return bits.join(' ');
+  };
+
+  const sel = (name, value, opts) =>
+    `<select class="ifield" data-k="${name}">
+      <option value=""${value == null || value === '' ? ' selected' : ''}>미평가</option>
+      ${opts
+        .map(
+          ([v, label]) =>
+            `<option value="${escapeHtml(String(v))}"${
+              String(value) === String(v) ? ' selected' : ''
+            }>${escapeHtml(label)}</option>`
+        )
+        .join('')}
+    </select>`;
+
+  const rows = list
+    .map(
+      (r) => `<details class="irow${r.evaluated ? '' : ' irow-todo'}"
+      data-name="${escapeHtml(r.name)}"
+      data-eval="${r.evaluated ? '1' : '0'}" data-verdict="${escapeHtml(r.verdict || '')}">
+      <summary>
+        <span class="iname">${escapeHtml(r.name)}</span>
+        <span class="isum">${summaryOf(r)}</span>
+      </summary>
+      <div class="iedit">
+        <div class="ifields">
+          <label class="ifl">강사구성${sel('staffScore', r.staffScore, [
+            [0, '0 (신청 대상 제외)'],
+            [3, '3'],
+            [4, '4'],
+            [4.5, '4.5'],
+            [5, '5'],
+          ])}</label>
+          <label class="ifl">강사료${sel('pay', r.pay, [
+            ['good', '좋음'],
+            ['avg', '평균'],
+            ['poor', '아쉬움'],
+          ])}</label>
+          <label class="ifl">연수${sel('training', r.training, [
+            ['online', '온라인'],
+            ['offline', '오프라인'],
+          ])}</label>
+          <label class="ifl">간식${sel('snack', r.snack, [
+            ['yes', '줌'],
+            ['no', '안 줌'],
+            ['unknown', '모름'],
+          ])}</label>
+          <label class="ifl">종합판정${sel('verdict', r.verdict, [
+            ['redo', '재신청'],
+            ['ok', '보통'],
+            ['skip', '거르기'],
+          ])}</label>
+          <label class="ifl ifl-heart">
+            <input type="checkbox" class="ifield" data-k="heart" ${r.heart ? 'checked' : ''}>
+            <span>❤️ 정성 호감</span>
+          </label>
+        </div>
+        <div class="iskip muted small"${r.staffScore === 0 ? '' : ' hidden'}>
+          강사구성 0 — <b>신청 대상 제외</b>로 보고 종합판정을 '거르기'로 고정합니다.
+        </div>
+        <label class="ifl ifl-wide">신청결과 메모
+          <input type="text" class="ifield" data-k="approvalNote" maxlength="500"
+            placeholder="예: 신청한 것 다 해줌" value="${escapeHtml(r.approvalNote || '')}">
+        </label>
+        <label class="ifl ifl-wide">자유 메모
+          <textarea class="ifield" data-k="memo" rows="2" maxlength="500"
+            placeholder="정성 평가·특이사항">${escapeHtml(r.memo || '')}</textarea>
+        </label>
+        <div class="iactions">
+          <button type="button" class="btn btn-green btn-sm isave">저장</button>
+          <span class="imsg muted small"></span>
+        </div>
+      </div>
+    </details>`
+    )
+    .join('');
+
+  return `
+    <div class="card" id="institutions">
+      <div class="card-title">🏢 기관 평가</div>
+      <label class="opt ${s.showRatings ? 'on' : ''}" id="showRatingsOpt">
+        <input type="checkbox" id="showRatings" ${s.showRatings ? 'checked' : ''}>
+        <span>플래너에 표시</span>
+      </label>
+      <div class="muted small" style="margin-top:8px;">
+        켜면 플래너·최근 감지 카드의 업체명 앞에 <b>🟢재신청 / 🟡보통 / 🔴거르기 · ★강사구성 · ❤️</b>
+        표식이 붙습니다. 끄면 이 설정 페이지에서만 보입니다. (텔레그램 메시지는 영향 없음)
+      </div>
+      <div class="muted small istats" style="margin-top:10px;">
+        전체 <b>${list.length}</b> · 평가완료 <b class="idone">${done}</b> ·
+        미평가 <b class="itodo">${list.length - done}</b>
+      </div>
+      <div class="ifilters">
+        <button type="button" class="fchip on" data-f="all">전체</button>
+        <button type="button" class="fchip" data-f="done">평가완료</button>
+        <button type="button" class="fchip" data-f="todo">미평가</button>
+        <button type="button" class="fchip" data-f="redo">재신청만</button>
+      </div>
+      <div class="ilist">${rows}</div>
+    </div>`;
+}
+
 // ---- 페이지: 설정 (보호) ----
 app.get('/settings', requireAuth, (req, res) => {
   const s = storage.getSettings();
@@ -500,6 +620,8 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
     </form>
 
+    ${institutionsSection(s)}
+
     <div class="card">
       <div class="card-title">🔔 알림 리허설</div>
       <div class="muted small" style="margin-bottom:12px;">
@@ -572,6 +694,107 @@ app.get('/settings', requireAuth, (req, res) => {
           }
         });
       }
+
+      // ---- 기관 평가: 표시 토글 / 필터 / 개별 저장 ----
+      (function institutions() {
+        var box = document.getElementById('institutions');
+        if (!box) return;
+
+        // 표시 토글은 즉시 저장 (감시 조건 폼과 별개)
+        var sw = document.getElementById('showRatings');
+        sw.addEventListener('change', async () => {
+          document.getElementById('showRatingsOpt').classList.toggle('on', sw.checked);
+          try {
+            const r = await fetch('/api/settings', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ showRatings: sw.checked }),
+            });
+            const d = await r.json();
+            toast(d.ok ? (sw.checked ? '플래너에 평가 표식 표시' : '평가 표식 숨김') : '저장 실패');
+          } catch (e) { toast('오류: ' + e.message); }
+        });
+
+        // 필터 칩
+        box.querySelectorAll('.fchip').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            box.querySelectorAll('.fchip').forEach((c) => c.classList.remove('on'));
+            chip.classList.add('on');
+            var f = chip.dataset.f;
+            box.querySelectorAll('.irow').forEach((row) => {
+              var ok = f === 'all'
+                || (f === 'done' && row.dataset.eval === '1')
+                || (f === 'todo' && row.dataset.eval === '0')
+                || (f === 'redo' && row.dataset.verdict === 'redo');
+              row.hidden = !ok;
+            });
+          });
+        });
+
+        // 강사구성 0 → 종합판정 '거르기' 고정 + 안내
+        box.addEventListener('change', (e) => {
+          var f = e.target.closest('.ifield');
+          if (!f || f.dataset.k !== 'staffScore') return;
+          var row = f.closest('.irow');
+          var zero = f.value === '0';
+          var verdict = row.querySelector('[data-k="verdict"]');
+          if (zero) { verdict.value = 'skip'; }
+          verdict.disabled = zero;
+          row.querySelector('.iskip').hidden = !zero;
+        });
+
+        // 개별 저장
+        box.querySelectorAll('.isave').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            var row = btn.closest('.irow');
+            var msg = row.querySelector('.imsg');
+            var payload = {};
+            row.querySelectorAll('.ifield').forEach((f) => {
+              payload[f.dataset.k] = f.type === 'checkbox' ? f.checked : f.value;
+            });
+            btn.disabled = true; msg.textContent = '저장 중…';
+            try {
+              const r = await fetch('/api/institutions/' + encodeURIComponent(row.dataset.name), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+              const d = await r.json();
+              if (!d.ok) { msg.textContent = '저장 실패: ' + (d.error || ''); return; }
+              msg.textContent = '저장됨 ✓';
+              applySaved(row, d.institution);
+            } catch (e) {
+              msg.textContent = '오류: ' + e.message;
+            } finally { btn.disabled = false; }
+          });
+        });
+
+        // 저장 결과를 접힌 요약·필터 속성·통계에 반영
+        function applySaved(row, r) {
+          row.dataset.eval = r.evaluated ? '1' : '0';
+          row.dataset.verdict = r.verdict || '';
+          row.classList.toggle('irow-todo', !r.evaluated);
+          var DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
+          var LBL = { redo: '재신청', ok: '보통', skip: '거르기' };
+          var html = '';
+          if (!r.evaluated) {
+            html = '<span class="muted small">미평가</span>';
+          } else {
+            var bits = [];
+            if (DOT[r.verdict]) bits.push('<span class="vchip v-' + r.verdict + '">' + DOT[r.verdict] + ' ' + LBL[r.verdict] + '</span>');
+            if (r.staffScore !== null && r.staffScore !== undefined) bits.push('<span class="isc">★' + r.staffScore + '</span>');
+            if (r.heart) bits.push('<span class="ihe">❤️</span>');
+            html = bits.join(' ');
+          }
+          row.querySelector('.isum').innerHTML = html;
+          // 강사구성 0 저장 시 서버가 판정을 skip 으로 바꾸므로 화면도 맞춘다
+          row.querySelector('[data-k="verdict"]').value = r.verdict || '';
+          var rows = box.querySelectorAll('.irow');
+          var done = box.querySelectorAll('.irow[data-eval="1"]').length;
+          box.querySelector('.idone').textContent = done;
+          box.querySelector('.itodo').textContent = rows.length - done;
+        }
+      })();
 
       // 체크 시각적 토글
       form.addEventListener('change', (e) => {
@@ -655,6 +878,26 @@ app.post('/api/settings', requireAuth, (req, res) => {
     res.json({ ok: true, settings: saved });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ---- 기관 평가 API ----
+app.get('/api/institutions', requireAuth, (req, res) => {
+  try {
+    res.json({ ok: true, institutions: storage.getInstitutions() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 기관 1건 저장. 이름은 경로에 담는다(한글이므로 클라이언트에서 encodeURIComponent).
+app.post('/api/institutions/:name', requireAuth, (req, res) => {
+  try {
+    const saved = storage.saveInstitution(req.params.name, req.body || {});
+    invalidateInstitutions(); // 표식 캐시 갱신
+    res.json({ ok: true, institution: saved });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
   }
 });
 
@@ -849,6 +1092,66 @@ const MINE_CHIP_CLASS = {
   welfare: 'tc-welfare', // 초록
 };
 
+// ---- 기관 평가 표식 ----
+// 평가 데이터는 자주 안 바뀌므로 메모리에 들고 있다가 저장 시에만 비운다.
+let _instCache = null;
+function institutionsCached() {
+  if (!_instCache) _instCache = storage.getInstitutions();
+  return _instCache;
+}
+function invalidateInstitutions() {
+  _instCache = null;
+}
+
+// 프로그램의 institution 문자열 → 평가 레코드. 정확 매칭 우선, 실패 시 부분 매칭.
+// (짧은 이름의 오매칭을 막으려고 부분 매칭은 3글자 이상만 허용)
+function lookupInstitution(institution) {
+  const q = String(institution || '').trim();
+  if (!q) return null;
+  const list = institutionsCached();
+  const exact = list.find((r) => r.name === q);
+  if (exact) return exact;
+  const qs = q.replace(/\s+/g, '');
+  return (
+    list.find((r) => {
+      const n = String(r.name || '').replace(/\s+/g, '');
+      if (n.length < 3) return false;
+      return n === qs || qs.includes(n) || n.includes(qs);
+    }) || null
+  );
+}
+
+const VERDICT_DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
+const VERDICT_LABEL = { redo: '재신청', ok: '보통', skip: '거르기' };
+const PAY_LABEL = { good: '강사료 좋음', avg: '강사료 평균', poor: '강사료 아쉬움' };
+const TRAINING_LABEL = { online: '온라인 연수', offline: '오프라인 연수' };
+const SNACK_LABEL = { yes: '간식 줌', no: '간식 안 줌', unknown: '간식 모름' };
+
+// 업체명 앞에 붙는 표식 (설정 showRatings 가 ON 이고 평가된 기관일 때만)
+// 미평가·매칭 실패면 빈 문자열 → 카드는 아무 영향 없이 그대로 그려진다.
+function ratingMark(institution, show) {
+  if (!show) return '';
+  const r = lookupInstitution(institution);
+  if (!r || !r.evaluated) return '';
+  const bits = [];
+  if (VERDICT_DOT[r.verdict]) bits.push(VERDICT_DOT[r.verdict]);
+  if (r.staffScore != null) bits.push('★' + r.staffScore);
+  if (r.heart) bits.push('❤️');
+  if (!bits.length) return '';
+  const tip = [
+    VERDICT_LABEL[r.verdict],
+    r.staffScore != null ? '강사구성 ' + r.staffScore : '',
+    PAY_LABEL[r.pay],
+    TRAINING_LABEL[r.training],
+    SNACK_LABEL[r.snack],
+    (r.approvalNote || '').trim(),
+    (r.memo || '').trim(),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return `<span class="imark" title="${escapeHtml(tip)}">${bits.join('')}</span>`;
+}
+
 // Tabler 아이콘을 인라인 SVG 로 넣는다.
 // 아이콘 폰트(CDN)를 쓰지 않으므로 폰트가 안 뜨는 망(학교 등)에서도 깨지지 않고,
 // 혹시 이름이 없으면 빈 문자열을 돌려줘 텍스트만 남는다.
@@ -1034,10 +1337,11 @@ function targetChipsHtml(x) {
   return `<span class="tchips">${chips.join('')}</span>`;
 }
 
-// 카드 1행: [업체명] 프로그램명 + 우측 chevron
-function cardHead(x) {
+// 카드 1행: [기관 평가 표식] [업체명] 프로그램명 + 우측 chevron
+function cardHead(x, showRatings) {
   const inst = String(x.institution || '').trim();
   return `<div class="pi-head">
+      ${ratingMark(inst, showRatings)}
       ${inst ? `<span class="pi-inst">[${escapeHtml(inst)}]</span>` : ''}
       <span class="pi-name">${escapeHtml(x.title || '')}</span>
       <span class="pi-go" aria-hidden="true">${icon('chevron-right')}</span>
@@ -1046,6 +1350,7 @@ function cardHead(x) {
 
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
 function renderPlanner() {
+  const showRatings = !!storage.getSettings().showRatings;
   const state = storage.getState();
   const details = storage.getDetails();
   const ids = Object.keys(state);
@@ -1095,7 +1400,7 @@ function renderPlanner() {
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         ${railDdayHtml(dd)}
         <div class="pi-body">
-          ${cardHead(x)}
+          ${cardHead(x, showRatings)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
           ${capRow}
         </div>
@@ -1116,7 +1421,7 @@ function renderPlanner() {
       )}" target="_blank" rel="noopener">
         ${railHtml(c)}
         <div class="pi-body">
-          ${cardHead(x)}
+          ${cardHead(x, showRatings)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
           ${gaugeHtml(c)}
         </div>
@@ -1326,6 +1631,43 @@ function pageShell(title, body) {
   .g3-pend { background:var(--gauge-pend); }
   .g3-full .g3-app, .g3-full .g3-pend { background:var(--gauge-full); }
   .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
+  /* 기관 평가 표식 (업체명 앞) */
+  .imark { flex:none; font-size:11.5px; font-weight:700; letter-spacing:-0.01em;
+    display:inline-flex; align-items:center; gap:1px; cursor:help; }
+  /* 기관 평가 섹션 */
+  .ifilters { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0 10px; }
+  .fchip { background:var(--surface-1); color:var(--text-secondary); border:1px solid var(--line);
+    border-radius:999px; padding:5px 13px; font-size:12.5px; font-weight:700; cursor:pointer; }
+  .fchip.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); }
+  .ilist { border-top:1px solid var(--line); }
+  .irow { border-bottom:1px solid var(--line); }
+  .irow > summary { display:flex; align-items:center; gap:10px; padding:10px 2px; cursor:pointer;
+    list-style:none; font-size:13.5px; }
+  .irow > summary::-webkit-details-marker { display:none; }
+  .irow > summary::before { content:'▸'; color:var(--text-muted); flex:none; font-size:11px; }
+  .irow[open] > summary::before { content:'▾'; }
+  .irow-todo > summary { opacity:.55; }
+  .iname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+  .isum { flex:none; display:flex; align-items:center; gap:6px; }
+  .vchip { font-size:11px; font-weight:700; padding:1px 8px; border-radius:999px; white-space:nowrap; }
+  .v-redo { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
+  .v-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
+  .v-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  .isc { font-size:12px; font-weight:800; color:var(--text-secondary); }
+  .iedit { padding:4px 2px 14px; }
+  .ifields { display:flex; flex-wrap:wrap; gap:10px 14px; }
+  .ifl { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-secondary);
+    font-weight:600; }
+  .ifl-heart { flex-direction:row; align-items:center; gap:6px; align-self:flex-end;
+    padding-bottom:7px; cursor:pointer; }
+  .ifl-wide { margin-top:10px; }
+  .ifl select, .ifl input[type="text"], .ifl textarea { background:var(--surface-2); color:var(--ink);
+    border:1px solid var(--line); border-radius:9px; padding:7px 9px; font-size:13px;
+    font-family:inherit; }
+  .ifl-wide input[type="text"], .ifl-wide textarea { width:100%; }
+  .iskip { margin-top:10px; background:var(--rail-full-bg); color:var(--rail-full-fg);
+    border-radius:9px; padding:7px 10px; font-weight:600; }
+  .iactions { display:flex; align-items:center; gap:10px; margin-top:12px; }
   /* 정보 변경 줄 (레일 없는 단순 행) */
   .chgrow { padding:8px 2px; }
   .chgrow + .chgrow { border-top:1px solid var(--line); }
