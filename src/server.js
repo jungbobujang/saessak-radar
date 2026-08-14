@@ -831,6 +831,44 @@ function conditionChips(s) {
     .join('');
 }
 
+// ============================================================================
+// 플래너 메타 시각화 (v5)
+// ============================================================================
+
+// 우리 학교가 해당되는 교육대상 — 이 값만 진한 색칩으로 강조하고 나머지는 회색으로 누른다.
+// 학교 사정이 바뀌면 이 배열만 고치면 된다. (감시 조건(settings.targets)과는 별개)
+const TARGET_MINE = [
+  '일반형',
+  '사회적 배려형(이주배경(구 다문화))',
+  '교육복지우선지원사업 학교',
+];
+// 진한 색칩의 색 클래스 (라벨 key → CSS 클래스)
+const MINE_CHIP_CLASS = {
+  general: 'tc-general', // 파랑
+  migrant: 'tc-migrant', // 보라
+  welfare: 'tc-welfare', // 초록
+};
+
+// Tabler 아이콘을 인라인 SVG 로 넣는다.
+// 아이콘 폰트(CDN)를 쓰지 않으므로 폰트가 안 뜨는 망(학교 등)에서도 깨지지 않고,
+// 혹시 이름이 없으면 빈 문자열을 돌려줘 텍스트만 남는다.
+const ICON_PATHS = {
+  // ti-clock-hour-4
+  'clock-hour-4':
+    '<circle cx="12" cy="12" r="9"/><path d="M12 12l3 2"/><path d="M12 7v5"/>',
+  // ti-users
+  users:
+    '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2"/>' +
+    '<path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0 -3 -3.85"/>',
+};
+function icon(name) {
+  const paths = ICON_PATHS[name];
+  if (!paths) return ''; // 폴백: 아이콘 없으면 텍스트만
+  return `<svg class="ti ti-${name}" width="13" height="13" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+    aria-hidden="true" focusable="false">${paths}</svg>`;
+}
+
 // ---- 정원 표시 (잔여 중심) ----
 // 목록 API 값(state)이 가장 최신이고, 없으면 상세(detail) 값으로 보완한다.
 //   cap=정원(모집 학급) · app=승인 · pend=대기
@@ -846,23 +884,65 @@ function capacityLabel(x, opts = {}) {
   const wait = pend != null && pend > 0 ? ` (대기 ${pend})` : '';
 
   // 승인 수치가 아직 없으면 정원만 담백하게
-  if (app == null) return { text: `정원 ${cap}학급${wait}`, cls: 'cap-plain' };
-  // 오픈 예정: 대개 승인 0 → 잔여를 강조할 게 아니라 정원만
-  if (opts.preOpen && app === 0) return { text: `정원 ${cap}학급 (오픈 전)${wait}`, cls: 'cap-plain' };
+  if (app == null) return { text: `${cap}학급${wait}`, cls: 'cap-plain' };
+  // 오픈 예정: 대개 승인 0 → 잔여를 강조할 게 아니라 정원만 (게이지도 안 그린다)
+  if (opts.preOpen && app === 0) return { text: `${cap}학급 (오픈 전)${wait}`, cls: 'cap-plain' };
 
   const rem = Math.max(0, cap - app);
-  if (rem === 0) return { text: `마감 임박 · 대기만 가능${wait}`, cls: 'cap-full' };
+  if (rem === 0) return { text: `마감·대기만${wait}`, cls: 'cap-full' };
   return { text: `${cap}학급 중 ${rem}개 남음${wait}`, cls: 'cap-remain' };
 }
 
-// 교육대상 요약 (상세의 신청대상 우선, 없으면 목록 태그). 최대 3개 + '외 N'.
-// 같은 값을 텍스트와 #해시태그로 두 번 찍지 않기 위해 이 한 곳에서만 만든다.
-function targetSummary(x) {
+// 정원 표시를 사람 아이콘과 함께 한 조각으로 (없으면 빈 문자열)
+function capacityHtml(x, opts) {
+  const info = capacityLabel(x, opts);
+  if (!info) return '';
+  return `<span class="metabit ${info.cls}">${icon('users')}${escapeHtml(info.text)}</span>`;
+}
+
+// 차시 표시 (시계 아이콘 + "N차시"). 값이 없으면 빈 문자열.
+function chaptersHtml(x) {
+  const n = x.detail && x.detail.totalChapters != null ? x.detail.totalChapters : null;
+  if (n == null) return '';
+  return `<span class="metabit">${icon('clock-hour-4')}${escapeHtml(n + '차시')}</span>`;
+}
+
+// 교육대상 색칩 (B안 — 우리 학교 해당 대상만 강조, 나머지는 회색으로 누름)
+//  · 정렬: 우리 학교 대상 먼저, 그 외는 뒤 (각 그룹 안에서는 원래 순서 유지)
+//  · 최대 3개까지 노출 + 초과분은 회색 '외 N'.
+//    단 우리 학교 대상이 3개를 넘더라도 그 칩들은 잘리지 않는다.
+//  · 상세의 신청대상을 우선 쓰고 없으면 목록 태그. 여기 한 곳에서만 만들어 중복 표기를 막는다.
+function targetChipsHtml(x) {
   const names =
     x.detail && x.detail.targetNames && x.detail.targetNames.length
       ? x.detail.targetNames
       : x.tags || [];
-  return classify.summarize(names, 3);
+  const items = classify.normalizeList(names).map((full) => {
+    const key = classify.canonicalKey(full);
+    return {
+      full,
+      label: classify.chipOf(full),
+      mine: TARGET_MINE.includes(full),
+      cls: (key && MINE_CHIP_CLASS[key]) || 'tc-other',
+    };
+  });
+  if (!items.length) return '';
+
+  const mine = items.filter((i) => i.mine);
+  const rest = items.filter((i) => !i.mine);
+  const ordered = mine.concat(rest);
+  const limit = Math.max(3, mine.length); // 우리 학교 대상은 잘리지 않게
+  const shown = ordered.slice(0, limit);
+  const hidden = ordered.length - shown.length;
+
+  const chips = shown.map(
+    (i) =>
+      `<span class="tchip ${i.mine ? i.cls : 'tc-other'}" title="${escapeHtml(i.full)}">${escapeHtml(
+        i.label
+      )}</span>`
+  );
+  if (hidden > 0) chips.push(`<span class="tchip tc-other">외 ${hidden}</span>`);
+  return `<div class="plan-chips">${chips.join('')}</div>`;
 }
 
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
@@ -893,8 +973,9 @@ function renderPlanner() {
     return 0;
   });
 
-  // 그룹 B: 잔여(정원-승인) 많은 순
-  const remain = (x) => (x.capacityClasses || 0) - (x.approvedClasses || 0);
+  // 그룹 B: 잔여(정원-승인) 많은 순.
+  // 승인이 정원을 넘긴 건도 0으로 눌러, 잔여 0(= 대기만 가능)끼리 맨 아래에 모이게 한다.
+  const remain = (x) => Math.max(0, (x.capacityClasses || 0) - (x.approvedClasses || 0));
   live.sort((a, b) => remain(b) - remain(a));
 
   const openRows = open
@@ -911,23 +992,16 @@ function renderPlanner() {
       const whenHtml = when
         ? `<span class="plan-when">${escapeHtml(when)}</span> ${ddChip}`
         : '<span class="badge badge-unknown">일시 미공지</span>';
-      const chapters =
-        x.detail && x.detail.totalChapters != null ? x.detail.totalChapters + '차시' : '';
-      // 교육대상은 한 번만 (텍스트형). #해시태그 중복 표기는 제거했다.
-      const targets = targetSummary(x);
-      const capInfo = capacityLabel(x, { preOpen: true });
-      const metaHtml = [
-        chapters ? escapeHtml(chapters) : '',
-        capInfo ? `<span class="${capInfo.cls}">${escapeHtml(capInfo.text)}</span>` : '',
-        targets ? escapeHtml(targets) : '',
-      ]
+      // 오픈 예정: 차시 + 정원(오픈 전). 게이지는 그리지 않는다.
+      const metaHtml = [chaptersHtml(x), capacityHtml(x, { preOpen: true })]
         .filter(Boolean)
-        .join(' · ');
+        .join('<span class="metasep">·</span>');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
           <div class="plan-open">${whenHtml}</div>
           <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
           ${metaHtml ? `<div class="plan-meta">${metaHtml}</div>` : ''}
+          ${targetChipsHtml(x)}
         </div>
         <span class="plan-go">상세 ↗</span>
       </a>`;
@@ -940,22 +1014,22 @@ function renderPlanner() {
       const app = x.approvedClasses || 0;
       const rem = Math.max(0, cap - app);
       const pct = cap > 0 ? Math.min(100, Math.round((app / cap) * 100)) : 0;
-      // 잔여 문구는 배지 하나로만 (게이지 + 배지 + "승인 n/m" 3중 표기 제거)
-      const capInfo = capacityLabel(x);
-      const capBadge = capInfo
-        ? `<span class="badge ${capInfo.cls === 'cap-full' ? 'badge-full' : 'badge-remain'}">${escapeHtml(
-            capInfo.text
-          )}</span>`
-        : '';
       const end = x.detail && x.detail.applyEndAt ? fmtKstDateTime(x.detail.applyEndAt) : '';
-      // 교육대상은 한 번만 (텍스트형). #해시태그 중복 표기는 제거했다.
-      const targets = targetSummary(x);
-      const meta = [end ? '마감 ' + end : '', targets].filter(Boolean).join(' · ');
+      // 지금 신청 가능: 차시 + 잔여 정원 + 마감. 정원 게이지는 이 그룹에서만 노출한다.
+      const metaHtml = [
+        chaptersHtml(x),
+        capacityHtml(x),
+        // '마감·대기만'(정원 상태)과 헷갈리지 않게 접수 마감은 '접수마감'으로 명시
+        end ? `<span class="metabit">접수마감 ${escapeHtml(end)}</span>` : '',
+      ]
+        .filter(Boolean)
+        .join('<span class="metasep">·</span>');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
-          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))} ${capBadge}</div>
+          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
+          ${metaHtml ? `<div class="plan-meta">${metaHtml}</div>` : ''}
           ${cap > 0 ? `<div class="gauge"><div class="gauge-fill ${rem === 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>` : ''}
-          ${meta ? `<div class="plan-meta">${escapeHtml(meta)}</div>` : ''}
+          ${targetChipsHtml(x)}
         </div>
         <span class="plan-go">상세 ↗</span>
       </a>`;
@@ -974,16 +1048,25 @@ function renderPlanner() {
     )
     .join('');
 
+  // 섹션 순서: '지금 신청 가능'을 '신청 오픈 예정'보다 위에 둔다.
+  // 갑자기 뜬 매물은 그 자리에서 바로 대응해야 하지만, 오픈 예정은 미리 준비할 시간이 있다.
+  // 다만 신청 가능이 0건이면 한 줄로 최소화해 오픈 예정이 자연스럽게 위로 올라오게 한다.
+  const liveSection = live.length
+    ? `<div class="plan-group">
+        <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">${live.length}</span></div>
+        ${liveRows}
+      </div>`
+    : `<div class="plan-group plan-group-min">
+        <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">현재 없음</span></div>
+      </div>`;
+
   const html = `
     <div class="card planner">
       <div class="card-title">🗂️ 신청 플래너</div>
+      ${liveSection}
       <div class="plan-group">
         <div class="plan-group-title">🕐 신청 오픈 예정 <span class="muted small">${open.length}</span></div>
         ${openRows || '<div class="muted small">예정된 프로그램이 없습니다.</div>'}
-      </div>
-      <div class="plan-group">
-        <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">${live.length}</span></div>
-        ${liveRows || '<div class="muted small">신청 가능한 프로그램이 없습니다.</div>'}
       </div>
       ${
         changeRows
@@ -1005,7 +1088,31 @@ function pageShell(title, body) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} · 새싹 레이더</title>
 <style>
-  :root { --green:#22a95f; --green-d:#178a4c; --bg:#f6f9f6; --ink:#1c2a22; --muted:#8a988f; --line:#e6ede8; }
+  :root {
+    --green:#22a95f; --green-d:#178a4c; --bg:#f6f9f6; --ink:#1c2a22; --muted:#8a988f; --line:#e6ede8;
+    /* 표면·글자 토큰 (다크모드에서 이 값들만 갈아끼운다) */
+    --surface-1:#f1f6f2;   /* 눌린 배경: 회색칩·게이지 트랙·호버 */
+    --surface-2:#ffffff;   /* 카드 배경 */
+    --text-secondary:#5c6b62;
+    --text-muted:#8a988f;
+    /* 정원 게이지 */
+    --gauge-ok:#1D9E75; --gauge-full:#E24B4A;
+    /* 교육대상 진한 색칩 (우리 학교 대상) — 라이트 기준 */
+    --tc-general-bg:#E6F1FB; --tc-general-fg:#0C447C;
+    --tc-migrant-bg:#EEEDFE; --tc-migrant-fg:#26215C;
+    --tc-welfare-bg:#E1F5EE; --tc-welfare-fg:#085041;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#121714; --ink:#e6ede8; --muted:#8b9a90; --line:#26302a;
+      --surface-1:#1b221e; --surface-2:#171e1a;
+      --text-secondary:#a9b8ae; --text-muted:#8b9a90;
+      /* 진한 색칩: 배경은 어둡게, 글자는 밝게 뒤집어 대비 확보 */
+      --tc-general-bg:#12304f; --tc-general-fg:#BBD9F5;
+      --tc-migrant-bg:#2A2760; --tc-migrant-fg:#D5D2FA;
+      --tc-welfare-bg:#0E4034; --tc-welfare-fg:#B7E7D6;
+    }
+  }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
@@ -1014,27 +1121,27 @@ function pageShell(title, body) {
   .header { display:flex; align-items:center; justify-content:space-between; margin: 8px 0 18px; }
   .logo { font-size: 22px; font-weight: 800; letter-spacing:-0.02em; }
   .navlink { color:var(--green-d); text-decoration:none; font-weight:600; font-size:14px;
-    background:#fff; padding:8px 12px; border-radius:10px; border:1px solid var(--line); }
-  .navlink:hover { background:#f0f7f2; }
+    background:var(--surface-2); padding:8px 12px; border-radius:10px; border:1px solid var(--line); }
+  .navlink:hover { background:var(--surface-1); }
   .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:14px; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; }
+  .card { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; }
   .card-title { font-weight:700; font-size:15px; margin-bottom:9px; }
   /* v3 상태바 */
-  .statusbar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; background:#fff;
+  .statusbar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; background:var(--surface-2);
     border:1px solid var(--line); border-radius:12px; padding:10px 14px; margin-bottom:8px;
-    font-size:13px; color:#405046; }
+    font-size:13px; color:var(--text-secondary); }
   .sdot { width:9px; height:9px; border-radius:50%; flex:none; }
   .dot-ok { background:var(--green); box-shadow:0 0 0 3px #d9f0e2; }
   .dot-bad { background:#d9534f; box-shadow:0 0 0 3px #f7d9d8; }
   .dot-wait { background:#c9a227; box-shadow:0 0 0 3px #f5ecc9; }
   .sb-main { font-weight:800; color:var(--ink); }
-  .sb-sep { color:#cdd6d0; }
+  .sb-sep { color:var(--line); }
   .sb-perm { display:inline-flex; align-items:center; }
   .perm-ok { color:var(--green-d); font-weight:700; }
   .perm-bad { color:#d9534f; font-weight:700; cursor:help; }
   .condbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
     padding:2px 4px 0; margin-bottom:14px; }
-  .condlabel { font-size:11px; color:#8a978d; font-weight:600; margin-right:2px; }
+  .condlabel { font-size:11px; color:var(--text-muted); font-weight:600; margin-right:2px; }
   .condchip { font-size:11.5px; padding:2px 9px; border-radius:999px; font-weight:600; line-height:1.7; white-space:nowrap; }
   .cc-green { background:#E1F5EE; color:#085041; }
   .cc-yellow { background:#FAEEDA; color:#633806; }
@@ -1054,7 +1161,7 @@ function pageShell(title, body) {
     border-top:1px solid var(--line); border-radius:9px; }
   .logrow:first-child { border-top:none; }
   .logrow-link { text-decoration:none; color:inherit; transition:background .12s; }
-  .logrow-link:hover { background:#eef7f1; }
+  .logrow-link:hover { background:var(--surface-1); }
   .logrow-disabled { cursor:default; opacity:.62; }
   .logtitle { flex:1; font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .logtime { color:var(--muted); font-size:12px; white-space:nowrap; }
@@ -1069,31 +1176,46 @@ function pageShell(title, body) {
   .planner { border-color:#d7ebdf; }
   .plan-group { margin-top:6px; }
   .plan-group + .plan-group { margin-top:16px; border-top:1px dashed var(--line); padding-top:12px; }
-  .plan-group-title { font-size:13px; font-weight:800; color:#3a4a41; margin-bottom:8px; }
+  .plan-group-title { font-size:13px; font-weight:800; color:var(--text-secondary); margin-bottom:8px; }
+  /* 0건일 때의 '지금 신청 가능' — 제목 한 줄만 남기고 자리를 최소화 */
+  .plan-group-min .plan-group-title { margin-bottom:0; opacity:.6; font-weight:700; }
   .planrow { display:flex; align-items:center; gap:12px; padding:11px 12px; margin:0 -12px;
     border-radius:11px; text-decoration:none; color:inherit; transition:background .12s; }
-  .planrow:hover { background:#eef7f1; }
+  .planrow:hover { background:var(--surface-1); }
   .planrow-static, .planrow-static:hover { background:transparent; cursor:default; }
   .plan-main { flex:1; min-width:0; }
   .plan-title { font-size:13px; font-weight:700; margin-top:2px; word-break:break-word; }
   .plan-open { margin-top:3px; display:flex; align-items:center; gap:8px; }
   .plan-when { font-size:15px; font-weight:800; letter-spacing:-0.01em; color:var(--ink); }
-  .plan-meta { margin-top:3px; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .plan-meta { margin-top:4px; color:var(--text-secondary); font-size:12px;
+    display:flex; align-items:center; flex-wrap:wrap; gap:6px; min-width:0; }
+  /* 메타 조각: 아이콘 + 값 한 덩어리 (아이콘이 없어도 텍스트만 정상 표시) */
+  .metabit { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .metabit .ti { flex:none; opacity:.75; }
+  .metasep { color:var(--text-muted); opacity:.5; }
+  /* 교육대상 색칩 — 우리 학교 대상만 진한 색, 나머지는 회색으로 누름 */
+  .plan-chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .tchip { font-size:11px; font-weight:700; line-height:1.6; padding:1px 8px; border-radius:999px;
+    white-space:nowrap; }
+  .tc-general { background:var(--tc-general-bg); color:var(--tc-general-fg); }
+  .tc-migrant { background:var(--tc-migrant-bg); color:var(--tc-migrant-fg); }
+  .tc-welfare { background:var(--tc-welfare-bg); color:var(--tc-welfare-fg); }
+  .tc-other { background:var(--surface-1); color:var(--text-muted); font-weight:600; }
   .plan-go { color:var(--green-d); font-size:12px; font-weight:700; white-space:nowrap; opacity:.35; transition:opacity .12s; }
   .planrow:hover .plan-go { opacity:1; }
   .dchip { background:#eaf1ff; color:#2a52be; border:1px solid #d3e0fb; padding:2px 9px; border-radius:999px;
     font-size:12px; font-weight:800; white-space:nowrap; }
   .dchip-now { background:#ffecec; color:#d9534f; border-color:#f6cccc; }
-  .gauge { margin-top:6px; height:8px; background:#eef2ef; border-radius:999px; overflow:hidden; max-width:280px; }
-  .gauge-fill { height:100%; background:var(--green); border-radius:999px; }
-  .gauge-fill.gauge-full { background:#d9534f; }
+  .gauge { margin-top:6px; height:8px; background:var(--surface-1); border-radius:999px; overflow:hidden; max-width:280px; }
+  .gauge-fill { height:100%; background:var(--gauge-ok); border-radius:999px; }
+  .gauge-fill.gauge-full { background:var(--gauge-full); }
   .badge-change { background:#f0e9fb; color:#7c3aed; }
   .badge-unknown { background:#eef0f2; color:#7a848c; }
   .badge-remain { background:#eaf6ef; color:var(--green-d); }
   .badge-full { background:#fdeaea; color:#d9534f; }
-  /* 정원 표시(잔여 중심) — 마감 임박만 빨강, 나머지는 기본 색 */
-  .cap-full { color:#d9534f; font-weight:700; }
-  .cap-remain { color:inherit; font-weight:600; }
+  /* 정원 표시(잔여 중심) — 마감·대기만 빨강, 나머지는 기본 색 */
+  .cap-full { color:var(--gauge-full); font-weight:700; }
+  .cap-remain { font-weight:700; color:var(--ink); }
   .cap-plain { color:inherit; }
   .permchip { display:inline-flex; align-items:center; gap:6px; background:#eaf6ef; color:var(--green-d);
     border:1px solid #cfe9d8; padding:7px 13px; border-radius:999px; font-size:13px; font-weight:700;
@@ -1120,12 +1242,15 @@ function pageShell(title, body) {
   .btn-xs { padding:3px 10px; font-size:12px; border-radius:8px; }
   .badge-reminder { background:#eaf1ff; color:#2a52be; }
   .opts { display:flex; flex-wrap:wrap; gap:9px; }
-  .opt { display:inline-flex; align-items:center; gap:7px; background:#f4f8f5; border:1px solid var(--line);
+  .opt { display:inline-flex; align-items:center; gap:7px; background:var(--surface-1); border:1px solid var(--line);
     padding:9px 13px; border-radius:11px; cursor:pointer; font-size:14px; user-select:none; }
   .opt.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); font-weight:600; }
   .opt input { accent-color: var(--green); width:16px; height:16px; }
   .interval { display:flex; align-items:center; gap:10px; }
   .interval input { width:90px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; font-size:15px; }
+  /* 입력창도 표면 토큰을 따라가야 다크에서 흰 배경 + 흰 글자가 되지 않는다 */
+  input[type="text"], input[type="number"], input[type="password"] {
+    background:var(--surface-2); color:var(--ink); }
   .actions { display:flex; align-items:center; gap:14px; margin: 6px 0 20px; }
   .muted { color:var(--muted); }
   .small { font-size:12px; }
