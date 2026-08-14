@@ -831,6 +831,40 @@ function conditionChips(s) {
     .join('');
 }
 
+// ---- 정원 표시 (잔여 중심) ----
+// 목록 API 값(state)이 가장 최신이고, 없으면 상세(detail) 값으로 보완한다.
+//   cap=정원(모집 학급) · app=승인 · pend=대기
+// 반환: { text, cls } · 정원 자체가 미공개면 null (표시 생략)
+function capacityLabel(x, opts = {}) {
+  const d = x.detail || {};
+  const pick = (a, b) => (a != null ? a : b != null ? b : null);
+  const cap = pick(x.capacityClasses, d.capacityClasses);
+  const app = pick(x.approvedClasses, d.approvedClasses);
+  const pend = pick(x.pendingClasses, d.pendingClasses);
+
+  if (cap == null || cap <= 0) return null; // 정원 미공개 → 표시 생략
+  const wait = pend != null && pend > 0 ? ` (대기 ${pend})` : '';
+
+  // 승인 수치가 아직 없으면 정원만 담백하게
+  if (app == null) return { text: `정원 ${cap}학급${wait}`, cls: 'cap-plain' };
+  // 오픈 예정: 대개 승인 0 → 잔여를 강조할 게 아니라 정원만
+  if (opts.preOpen && app === 0) return { text: `정원 ${cap}학급 (오픈 전)${wait}`, cls: 'cap-plain' };
+
+  const rem = Math.max(0, cap - app);
+  if (rem === 0) return { text: `마감 임박 · 대기만 가능${wait}`, cls: 'cap-full' };
+  return { text: `${cap}학급 중 ${rem}개 남음${wait}`, cls: 'cap-remain' };
+}
+
+// 교육대상 요약 (상세의 신청대상 우선, 없으면 목록 태그). 최대 3개 + '외 N'.
+// 같은 값을 텍스트와 #해시태그로 두 번 찍지 않기 위해 이 한 곳에서만 만든다.
+function targetSummary(x) {
+  const names =
+    x.detail && x.detail.targetNames && x.detail.targetNames.length
+      ? x.detail.targetNames
+      : x.tags || [];
+  return classify.summarize(names, 3);
+}
+
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
 function renderPlanner() {
   const state = storage.getState();
@@ -879,17 +913,21 @@ function renderPlanner() {
         : '<span class="badge badge-unknown">일시 미공지</span>';
       const chapters =
         x.detail && x.detail.totalChapters != null ? x.detail.totalChapters + '차시' : '';
-      const targets =
-        x.detail && x.detail.targetNames && x.detail.targetNames.length
-          ? x.detail.targetNames.map((t) => classify.shortOf(t)).join('·')
-          : '';
-      const tags = (x.tags || []).map((t) => '#' + classify.shortOf(t)).join(' ');
-      const meta = [chapters, targets, tags].filter(Boolean).join(' · ');
+      // 교육대상은 한 번만 (텍스트형). #해시태그 중복 표기는 제거했다.
+      const targets = targetSummary(x);
+      const capInfo = capacityLabel(x, { preOpen: true });
+      const metaHtml = [
+        chapters ? escapeHtml(chapters) : '',
+        capInfo ? `<span class="${capInfo.cls}">${escapeHtml(capInfo.text)}</span>` : '',
+        targets ? escapeHtml(targets) : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
           <div class="plan-open">${whenHtml}</div>
           <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
-          ${meta ? `<div class="plan-meta">${escapeHtml(meta)}</div>` : ''}
+          ${metaHtml ? `<div class="plan-meta">${metaHtml}</div>` : ''}
         </div>
         <span class="plan-go">상세 ↗</span>
       </a>`;
@@ -900,21 +938,24 @@ function renderPlanner() {
     .map((x) => {
       const cap = x.capacityClasses || 0;
       const app = x.approvedClasses || 0;
-      const rem = cap - app;
+      const rem = Math.max(0, cap - app);
       const pct = cap > 0 ? Math.min(100, Math.round((app / cap) * 100)) : 0;
-      const remBadge =
-        rem <= 0
-          ? '<span class="badge badge-full">대기만 가능</span>'
-          : `<span class="badge badge-remain">잔여 ${rem}학급</span>`;
+      // 잔여 문구는 배지 하나로만 (게이지 + 배지 + "승인 n/m" 3중 표기 제거)
+      const capInfo = capacityLabel(x);
+      const capBadge = capInfo
+        ? `<span class="badge ${capInfo.cls === 'cap-full' ? 'badge-full' : 'badge-remain'}">${escapeHtml(
+            capInfo.text
+          )}</span>`
+        : '';
       const end = x.detail && x.detail.applyEndAt ? fmtKstDateTime(x.detail.applyEndAt) : '';
-      const tags = (x.tags || []).map((t) => '#' + classify.shortOf(t)).join(' ');
+      // 교육대상은 한 번만 (텍스트형). #해시태그 중복 표기는 제거했다.
+      const targets = targetSummary(x);
+      const meta = [end ? '마감 ' + end : '', targets].filter(Boolean).join(' · ');
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         <div class="plan-main">
-          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))} ${remBadge}</div>
-          <div class="gauge"><div class="gauge-fill ${rem <= 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>
-          <div class="plan-meta">승인 ${app}/${cap}학급${end ? ' · 마감 ' + escapeHtml(end) : ''}${
-        tags ? ' · ' + escapeHtml(tags) : ''
-      }</div>
+          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))} ${capBadge}</div>
+          ${cap > 0 ? `<div class="gauge"><div class="gauge-fill ${rem === 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>` : ''}
+          ${meta ? `<div class="plan-meta">${escapeHtml(meta)}</div>` : ''}
         </div>
         <span class="plan-go">상세 ↗</span>
       </a>`;
@@ -1050,6 +1091,10 @@ function pageShell(title, body) {
   .badge-unknown { background:#eef0f2; color:#7a848c; }
   .badge-remain { background:#eaf6ef; color:var(--green-d); }
   .badge-full { background:#fdeaea; color:#d9534f; }
+  /* 정원 표시(잔여 중심) — 마감 임박만 빨강, 나머지는 기본 색 */
+  .cap-full { color:#d9534f; font-weight:700; }
+  .cap-remain { color:inherit; font-weight:600; }
+  .cap-plain { color:inherit; }
   .permchip { display:inline-flex; align-items:center; gap:6px; background:#eaf6ef; color:var(--green-d);
     border:1px solid #cfe9d8; padding:7px 13px; border-radius:999px; font-size:13px; font-weight:700;
     margin-bottom:14px; }

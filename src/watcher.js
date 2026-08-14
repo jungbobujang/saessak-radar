@@ -193,11 +193,12 @@ async function sendTelegram(html, opts = {}) {
 function buildMessage(kind, card) {
   // kind: 'start' (모집 시작) | 'new' (새 프로그램)
   const head = kind === 'start' ? '🔴 <b>[모집 시작]</b>' : '🟡 <b>[새 프로그램]</b>';
+  // 교육대상은 한 번만, 최대 3개까지 (+ '외 N'). 줄이 길어지는 걸 막는다.
   const metaParts = [
     card.type,
     (card.regions || []).join(','),
     (card.levels || []).join(','),
-    (card.tags || []).map((t) => '#' + classify.shortOf(t)).join(' '),
+    classify.summarize(card.tags, 3, '#'),
   ].filter((x) => x && x.length);
 
   return (

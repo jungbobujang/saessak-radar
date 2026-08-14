@@ -132,6 +132,16 @@ function isKnown(label) {
   return canonicalKey(label) != null;
 }
 
+// 교육대상 목록 → 한 줄 요약. 축약 표기로 최대 max 개까지만 노출하고 나머지는 '외 N'.
+// (메타 줄이 길어지는 걸 막는다. 전체 목록은 사이트 상세에서 확인)
+function summarize(list, max = 3, prefix = '') {
+  const items = normalizeList(list).map((f) => prefix + shortOf(f));
+  if (!items.length) return '';
+  const sep = prefix ? ' ' : '·';
+  if (items.length <= max) return items.join(sep);
+  return items.slice(0, max).join(sep) + ` 외 ${items.length - max}`;
+}
+
 // 배열을 정식 라벨로 정규화 + 중복 제거(순서 보존)
 function normalizeList(arr) {
   const out = [];
@@ -157,6 +167,7 @@ module.exports = {
   fullOfCode,
   codeOf,
   shortOf,
+  summarize,
   isKnown,
   normalizeList,
 };
