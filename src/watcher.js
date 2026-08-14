@@ -190,6 +190,18 @@ async function sendTelegram(html, opts = {}) {
   }
 }
 
+// 실질 잔여 = 정원 - 승인 - 대기 (음수는 0).
+// 대기 학급이 이미 앞줄을 차지하므로 빼야 "지금 신청해서 될 자리"가 된다.
+// 대시보드(server.js capacityOf)와 같은 기준. 정원 미공개면 빈 문자열.
+function capacityText(card) {
+  const cap = card.capacityClasses;
+  if (cap == null || cap <= 0) return '';
+  const app = card.approvedClasses || 0;
+  const pend = card.pendingClasses || 0;
+  const real = Math.max(0, cap - app - pend);
+  return `실질 잔여 ${real}학급 (정원 ${cap}·승인 ${app}·대기 ${pend})`;
+}
+
 function buildMessage(kind, card) {
   // kind: 'start' (모집 시작) | 'new' (새 프로그램)
   const head = kind === 'start' ? '🔴 <b>[모집 시작]</b>' : '🟡 <b>[새 프로그램]</b>';
@@ -201,10 +213,12 @@ function buildMessage(kind, card) {
     classify.summarize(card.tags, 3, '#'),
   ].filter((x) => x && x.length);
 
+  const cap = capacityText(card);
   return (
     `${head}\n` +
     `<b>${escapeHtml(withInst(card.institution, card.title))}</b>\n` +
     `${escapeHtml(metaParts.join(' · '))}\n` +
+    (cap ? `${escapeHtml(cap)}\n` : '') +
     `${escapeHtml(card.link)}`
   );
 }
@@ -468,6 +482,10 @@ async function sendTestAlert() {
     levels: ['초등학교'],
     tags: ['일반형'], // buildMessage 가 '#' 를 붙여 #일반형 으로 렌더
     link: 'https://newsac.kosac.re.kr/',
+    // 실제 알림과 같은 모양이 나오도록 정원 수치도 넣는다 (실질 잔여 = 12-2-7 = 3)
+    capacityClasses: 12,
+    approvedClasses: 2,
+    pendingClasses: 7,
   };
 
   const tgConfigured = isTelegramConfigured();

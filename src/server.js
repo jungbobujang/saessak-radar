@@ -860,6 +860,12 @@ const ICON_PATHS = {
   users:
     '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2"/>' +
     '<path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0 -3 -3.85"/>',
+  // ti-calendar-event
+  'calendar-event':
+    '<rect x="4" y="5" width="16" height="16" rx="2"/><path d="M16 3v4"/><path d="M8 3v4"/>' +
+    '<path d="M4 11h16"/><path d="M8 15h2v2h-2z"/>',
+  // ti-chevron-right
+  'chevron-right': '<path d="M9 6l6 6l-6 6"/>',
 };
 function icon(name) {
   const paths = ICON_PATHS[name];
@@ -869,35 +875,59 @@ function icon(name) {
     aria-hidden="true" focusable="false">${paths}</svg>`;
 }
 
-// ---- 정원 표시 (잔여 중심) ----
+// ---- 정원 계산 (실질 잔여 기준) ----
 // 목록 API 값(state)이 가장 최신이고, 없으면 상세(detail) 값으로 보완한다.
 //   cap=정원(모집 학급) · app=승인 · pend=대기
-// 반환: { text, cls } · 정원 자체가 미공개면 null (표시 생략)
-function capacityLabel(x, opts = {}) {
+//
+// 실질 잔여 = 정원 - 승인 - 대기.
+// 대기 학급도 이미 앞줄을 차지하고 있으므로 빼야 "지금 신청해서 될 자리"가 나온다.
+// (정원-승인 만으로 계산하면 대기가 쌓인 프로그램을 여유 있는 것처럼 보이게 한다)
+// 반환: null(정원 미공개) 또는 계산된 수치 묶음.
+function capacityOf(x) {
   const d = x.detail || {};
   const pick = (a, b) => (a != null ? a : b != null ? b : null);
   const cap = pick(x.capacityClasses, d.capacityClasses);
-  const app = pick(x.approvedClasses, d.approvedClasses);
-  const pend = pick(x.pendingClasses, d.pendingClasses);
+  const appRaw = pick(x.approvedClasses, d.approvedClasses);
+  const pendRaw = pick(x.pendingClasses, d.pendingClasses);
+  if (cap == null || cap <= 0) return null;
 
-  if (cap == null || cap <= 0) return null; // 정원 미공개 → 표시 생략
-  const wait = pend != null && pend > 0 ? ` (대기 ${pend})` : '';
-
-  // 승인 수치가 아직 없으면 정원만 담백하게
-  if (app == null) return { text: `${cap}학급${wait}`, cls: 'cap-plain' };
-  // 오픈 예정: 대개 승인 0 → 잔여를 강조할 게 아니라 정원만 (게이지도 안 그린다)
-  if (opts.preOpen && app === 0) return { text: `${cap}학급 (오픈 전)${wait}`, cls: 'cap-plain' };
-
-  const rem = Math.max(0, cap - app);
-  if (rem === 0) return { text: `마감·대기만${wait}`, cls: 'cap-full' };
-  return { text: `${cap}학급 중 ${rem}개 남음${wait}`, cls: 'cap-remain' };
+  const app = appRaw || 0;
+  const pend = pendRaw || 0;
+  const realRemain = Math.max(0, cap - app - pend);
+  const full = realRemain === 0; // 정원+대기가 정원 이상 → 지금 신청하면 대기만
+  return {
+    cap,
+    app,
+    pend,
+    hasNumbers: appRaw != null, // 승인 수치가 아직 안 열린 건(오픈 전 등) 구분용
+    realRemain,
+    full,
+    appPct: Math.round((app / cap) * 100),
+    pendPct: Math.round((pend / cap) * 100),
+  };
 }
 
-// 정원 표시를 사람 아이콘과 함께 한 조각으로 (없으면 빈 문자열)
-function capacityHtml(x, opts) {
-  const info = capacityLabel(x, opts);
-  if (!info) return '';
-  return `<span class="metabit ${info.cls}">${icon('users')}${escapeHtml(info.text)}</span>`;
+// 정렬·레일에서 함께 쓰는 실질 잔여 (정원 미공개면 0 취급 → 맨 아래)
+function realRemainOf(x) {
+  const c = capacityOf(x);
+  return c ? c.realRemain : 0;
+}
+
+// "~M/D HH:MM" 짧은 날짜 표기 (요일 없이)
+function fmtCompact(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const g = (t) => (p.find((x) => x.type === t) || {}).value || '';
+  return `${g('month')}/${g('day')} ${g('hour')}:${g('minute')}`;
 }
 
 // 차시 표시 (시계 아이콘 + "N차시"). 값이 없으면 빈 문자열.
@@ -905,6 +935,58 @@ function chaptersHtml(x) {
   const n = x.detail && x.detail.totalChapters != null ? x.detail.totalChapters : null;
   if (n == null) return '';
   return `<span class="metabit">${icon('clock-hour-4')}${escapeHtml(n + '차시')}</span>`;
+}
+
+// 날짜 조각 (달력 아이콘 + "~M/D HH:MM")
+// prefix 를 빈 문자열로 주면 접두사 없이 날짜만 — 오픈 예정 카드의 '오픈 일시'는
+// 마감이 아니므로 '~' 를 붙이면 안 된다. (기본값은 마감용 '~')
+function dateHtml(iso, prefix) {
+  const t = fmtCompact(iso);
+  if (!t) return '';
+  const pre = prefix == null ? '~' : prefix;
+  return `<span class="metabit">${icon('calendar-event')}${escapeHtml(pre + t)}</span>`;
+}
+
+// 좌측 잔여 레일 (지금 신청 가능): 실질 잔여 크기에 따라 여유/임박/마감
+function railHtml(c) {
+  if (!c) return `<div class="rail rail-unknown"><div class="rail-num rail-num-sm">정원</div>
+      <div class="rail-label">미공개</div></div>`;
+  if (c.full) {
+    return `<div class="rail rail-full"><div class="rail-num rail-num-sm">마감</div>
+      <div class="rail-label">대기만</div></div>`;
+  }
+  const tone = c.realRemain >= 4 ? 'rail-ok' : 'rail-soon';
+  return `<div class="rail ${tone}"><div class="rail-num">${c.realRemain}</div>
+      <div class="rail-label">자리 남음</div></div>`;
+}
+
+// 좌측 레일 (오픈 예정): D-day 를 그대로 레일에 얹는다 (기존 색 규칙 유지)
+function railDdayHtml(dd) {
+  if (dd == null) {
+    return `<div class="rail rail-unknown"><div class="rail-num rail-num-sm">미정</div>
+      <div class="rail-label">일시 미공지</div></div>`;
+  }
+  if (dd <= 0) {
+    return `<div class="rail rail-dday-now"><div class="rail-num rail-num-sm">D-DAY</div>
+      <div class="rail-label">오늘 오픈</div></div>`;
+  }
+  return `<div class="rail rail-dday"><div class="rail-num">D-${dd}</div>
+      <div class="rail-label">뒤 오픈</div></div>`;
+}
+
+// 3단 게이지 + 우측 수치 텍스트 ("N정원 · 승인n · 대기k")
+//  진초록=승인 · 연초록=대기 · 빈 공간=실질 잔여 / 실질 잔여 0이면 전체 빨강
+function gaugeHtml(c) {
+  if (!c) return '';
+  const bar = c.full
+    ? `<div class="g3 g3-full"><div class="g3-app" style="width:100%"></div></div>`
+    : `<div class="g3">
+        <div class="g3-app" style="width:${c.appPct}%"></div>
+        <div class="g3-pend" style="width:${c.pendPct}%"></div>
+      </div>`;
+  return `<div class="pi-cap">${bar}
+      <span class="g3-text">${c.cap}정원 · 승인${c.app} · 대기${c.pend}</span>
+    </div>`;
 }
 
 // 교육대상 색칩 (B안 — 우리 학교 해당 대상만 강조, 나머지는 회색으로 누름)
@@ -942,7 +1024,17 @@ function targetChipsHtml(x) {
       )}</span>`
   );
   if (hidden > 0) chips.push(`<span class="tchip tc-other">외 ${hidden}</span>`);
-  return `<div class="plan-chips">${chips.join('')}</div>`;
+  return `<span class="tchips">${chips.join('')}</span>`;
+}
+
+// 카드 1행: [업체명] 프로그램명 + 우측 chevron
+function cardHead(x) {
+  const inst = String(x.institution || '').trim();
+  return `<div class="pi-head">
+      ${inst ? `<span class="pi-inst">[${escapeHtml(inst)}]</span>` : ''}
+      <span class="pi-name">${escapeHtml(x.title || '')}</span>
+      <span class="pi-go" aria-hidden="true">${icon('chevron-right')}</span>
+    </div>`;
 }
 
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
@@ -973,65 +1065,54 @@ function renderPlanner() {
     return 0;
   });
 
-  // 그룹 B: 잔여(정원-승인) 많은 순.
-  // 승인이 정원을 넘긴 건도 0으로 눌러, 잔여 0(= 대기만 가능)끼리 맨 아래에 모이게 한다.
-  const remain = (x) => Math.max(0, (x.capacityClasses || 0) - (x.approvedClasses || 0));
-  live.sort((a, b) => remain(b) - remain(a));
+  // 그룹 B: 실질 잔여(정원-승인-대기) 많은 순.
+  // 실질 잔여 0(= 지금 신청하면 대기만)은 자연히 맨 아래로 모인다.
+  live.sort((a, b) => realRemainOf(b) - realRemainOf(a));
 
+  // 오픈 예정 카드 — 레일은 D-day, 본문 3행(제목 / 차시·오픈일시·대상칩 / 정원)
   const openRows = open
     .map((x) => {
       const start = x.detail && x.detail.applyStartAt;
-      const when = start ? fmtKstDateTime(start) : '';
       const dd = start ? ddayKst(start, nowMs) : null;
-      const ddChip =
-        dd == null
-          ? ''
-          : dd <= 0
-          ? '<span class="dchip dchip-now">D-DAY</span>'
-          : `<span class="dchip">D-${dd}</span>`;
-      const whenHtml = when
-        ? `<span class="plan-when">${escapeHtml(when)}</span> ${ddChip}`
-        : '<span class="badge badge-unknown">일시 미공지</span>';
-      // 오픈 예정: 차시 + 정원(오픈 전). 게이지는 그리지 않는다.
-      const metaHtml = [chaptersHtml(x), capacityHtml(x, { preOpen: true })]
+      const c = capacityOf(x);
+      const metaHtml = [chaptersHtml(x), dateHtml(start, '')]
         .filter(Boolean)
         .join('<span class="metasep">·</span>');
+      // 오픈 전(승인 수치가 없거나 0)이면 게이지 대신 정원만 담백하게
+      const preOpen = !c || !c.hasNumbers || c.app + c.pend === 0;
+      const capRow = !c
+        ? ''
+        : preOpen
+        ? `<div class="pi-cap"><span class="metabit">${icon('users')}${c.cap}학급 오픈 전</span></div>`
+        : gaugeHtml(c);
       return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
-        <div class="plan-main">
-          <div class="plan-open">${whenHtml}</div>
-          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
-          ${metaHtml ? `<div class="plan-meta">${metaHtml}</div>` : ''}
-          ${targetChipsHtml(x)}
+        ${railDdayHtml(dd)}
+        <div class="pi-body">
+          ${cardHead(x)}
+          <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
+          ${capRow}
         </div>
-        <span class="plan-go">상세 ↗</span>
       </a>`;
     })
     .join('');
 
+  // 지금 신청 가능 카드 — 레일은 실질 잔여, 본문 3행(제목 / 차시·마감·대상칩 / 3단 게이지)
   const liveRows = live
     .map((x) => {
-      const cap = x.capacityClasses || 0;
-      const app = x.approvedClasses || 0;
-      const rem = Math.max(0, cap - app);
-      const pct = cap > 0 ? Math.min(100, Math.round((app / cap) * 100)) : 0;
-      const end = x.detail && x.detail.applyEndAt ? fmtKstDateTime(x.detail.applyEndAt) : '';
-      // 지금 신청 가능: 차시 + 잔여 정원 + 마감. 정원 게이지는 이 그룹에서만 노출한다.
-      const metaHtml = [
-        chaptersHtml(x),
-        capacityHtml(x),
-        // '마감·대기만'(정원 상태)과 헷갈리지 않게 접수 마감은 '접수마감'으로 명시
-        end ? `<span class="metabit">접수마감 ${escapeHtml(end)}</span>` : '',
-      ]
+      const c = capacityOf(x);
+      const end = x.detail && x.detail.applyEndAt;
+      const metaHtml = [chaptersHtml(x), dateHtml(end, '~')]
         .filter(Boolean)
         .join('<span class="metasep">·</span>');
-      return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
-        <div class="plan-main">
-          <div class="plan-title">${escapeHtml(instLabel(x.institution, x.title))}</div>
-          ${metaHtml ? `<div class="plan-meta">${metaHtml}</div>` : ''}
-          ${cap > 0 ? `<div class="gauge"><div class="gauge-fill ${rem === 0 ? 'gauge-full' : ''}" style="width:${pct}%"></div></div>` : ''}
-          ${targetChipsHtml(x)}
+      return `<a class="planrow ${c && c.full ? 'planrow-dim' : ''}" href="${escapeHtml(
+        x.link || '#'
+      )}" target="_blank" rel="noopener">
+        ${railHtml(c)}
+        <div class="pi-body">
+          ${cardHead(x)}
+          <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
+          ${gaugeHtml(c)}
         </div>
-        <span class="plan-go">상세 ↗</span>
       </a>`;
     })
     .join('');
@@ -1039,11 +1120,10 @@ function renderPlanner() {
   const changeLogs = storage.getLog().filter((l) => l.kind === 'change').slice(0, 5);
   const changeRows = changeLogs
     .map(
-      (l) => `<div class="planrow planrow-static">
-        <div class="plan-main">
-          <div class="plan-title"><span class="badge badge-change">정보 변경</span> ${escapeHtml(instLabel(l.institution, l.title))}</div>
-          <div class="plan-meta">${escapeHtml(l.changes || '')}</div>
-        </div>
+      (l) => `<div class="chgrow">
+        <div class="pi-head"><span class="badge badge-change">정보 변경</span>
+          <span class="pi-name">${escapeHtml(instLabel(l.institution, l.title))}</span></div>
+        <div class="pi-meta">${escapeHtml(l.changes || '')}</div>
       </div>`
     )
     .join('');
@@ -1095,8 +1175,13 @@ function pageShell(title, body) {
     --surface-2:#ffffff;   /* 카드 배경 */
     --text-secondary:#5c6b62;
     --text-muted:#8a988f;
-    /* 정원 게이지 */
-    --gauge-ok:#1D9E75; --gauge-full:#E24B4A;
+    /* 정원 게이지 — 진초록=승인 · 연초록=대기 · 빨강=실질 잔여 0 */
+    --gauge-ok:#1D9E75; --gauge-app:#1D9E75; --gauge-pend:#9FE1CB; --gauge-full:#E24B4A;
+    /* 좌측 잔여 레일 (여유 / 임박 / 마감·대기만 / D-day) */
+    --rail-ok-bg:#E1F5EE;   --rail-ok-fg:#085041;
+    --rail-soon-bg:#FAEEDA; --rail-soon-fg:#633806;
+    --rail-full-bg:#FCEBEB; --rail-full-fg:#791F1F;
+    --rail-dday-bg:#EAF1FF; --rail-dday-fg:#2A52BE;
     /* 교육대상 진한 색칩 (우리 학교 대상) — 라이트 기준 */
     --tc-general-bg:#E6F1FB; --tc-general-fg:#0C447C;
     --tc-migrant-bg:#EEEDFE; --tc-migrant-fg:#26215C;
@@ -1111,6 +1196,12 @@ function pageShell(title, body) {
       --tc-general-bg:#12304f; --tc-general-fg:#BBD9F5;
       --tc-migrant-bg:#2A2760; --tc-migrant-fg:#D5D2FA;
       --tc-welfare-bg:#0E4034; --tc-welfare-fg:#B7E7D6;
+      /* 레일도 같은 방식으로 뒤집는다 (게이지 색은 라이트와 동일하게 유지해도 대비가 난다) */
+      --rail-ok-bg:#0E4034;   --rail-ok-fg:#B7E7D6;
+      --rail-soon-bg:#4A3410; --rail-soon-fg:#F6DFB4;
+      --rail-full-bg:#4A1A1A; --rail-full-fg:#F5C4C4;
+      --rail-dday-bg:#1B2F55; --rail-dday-fg:#C3D6F7;
+      --gauge-pend:#3E7C68;
     }
   }
   * { box-sizing: border-box; }
@@ -1179,44 +1270,61 @@ function pageShell(title, body) {
   .plan-group-title { font-size:13px; font-weight:800; color:var(--text-secondary); margin-bottom:8px; }
   /* 0건일 때의 '지금 신청 가능' — 제목 한 줄만 남기고 자리를 최소화 */
   .plan-group-min .plan-group-title { margin-bottom:0; opacity:.6; font-weight:700; }
-  .planrow { display:flex; align-items:center; gap:12px; padding:11px 12px; margin:0 -12px;
-    border-radius:11px; text-decoration:none; color:inherit; transition:background .12s; }
-  .planrow:hover { background:var(--surface-1); }
-  .planrow-static, .planrow-static:hover { background:transparent; cursor:default; }
-  .plan-main { flex:1; min-width:0; }
-  .plan-title { font-size:13px; font-weight:700; margin-top:2px; word-break:break-word; }
-  .plan-open { margin-top:3px; display:flex; align-items:center; gap:8px; }
-  .plan-when { font-size:15px; font-weight:800; letter-spacing:-0.01em; color:var(--ink); }
-  .plan-meta { margin-top:4px; color:var(--text-secondary); font-size:12px;
+  /* ---- 플래너 카드 v6: [좌측 레일 64px] + [본문 3행] ---- */
+  .planrow { display:flex; align-items:stretch; margin-bottom:8px; border:1px solid var(--line);
+    border-radius:11px; overflow:hidden; text-decoration:none; color:inherit; transition:box-shadow .12s; }
+  .planrow:hover { box-shadow:0 2px 10px rgba(0,0,0,.07); }
+  .planrow:hover .pi-body { background:var(--surface-1); }
+  /* 실질 잔여 0(대기만) — 숨기지 않고 흐리게만 */
+  .planrow-dim { opacity:.85; }
+  .rail { width:64px; flex:none; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; padding:10px 4px; text-align:center; }
+  .rail-num { font-size:20px; font-weight:800; line-height:1.1; letter-spacing:-0.03em; }
+  .rail-num-sm { font-size:14px; }
+  .rail-label { font-size:10px; font-weight:700; margin-top:3px; opacity:.85; line-height:1.2; }
+  .rail-ok { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
+  .rail-soon { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
+  .rail-full { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  .rail-dday { background:var(--rail-dday-bg); color:var(--rail-dday-fg); }
+  .rail-dday-now { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  .rail-unknown { background:var(--surface-1); color:var(--text-muted); }
+  .pi-body { flex:1; min-width:0; padding:10px 12px; transition:background .12s; }
+  .pi-head { display:flex; align-items:center; gap:7px; min-width:0; }
+  .pi-inst { color:var(--text-muted); font-weight:400; font-size:12px; white-space:nowrap;
+    flex:none; max-width:40%; overflow:hidden; text-overflow:ellipsis; }
+  .pi-name { font-weight:500; font-size:13.5px; flex:1; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pi-go { color:var(--text-muted); flex:none; display:inline-flex; opacity:.55; }
+  .planrow:hover .pi-go { opacity:1; }
+  .pi-meta { margin-top:5px; color:var(--text-secondary); font-size:12px;
     display:flex; align-items:center; flex-wrap:wrap; gap:6px; min-width:0; }
   /* 메타 조각: 아이콘 + 값 한 덩어리 (아이콘이 없어도 텍스트만 정상 표시) */
   .metabit { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
   .metabit .ti { flex:none; opacity:.75; }
   .metasep { color:var(--text-muted); opacity:.5; }
   /* 교육대상 색칩 — 우리 학교 대상만 진한 색, 나머지는 회색으로 누름 */
-  .plan-chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .tchips { display:inline-flex; flex-wrap:wrap; gap:5px; }
   .tchip { font-size:11px; font-weight:700; line-height:1.6; padding:1px 8px; border-radius:999px;
     white-space:nowrap; }
   .tc-general { background:var(--tc-general-bg); color:var(--tc-general-fg); }
   .tc-migrant { background:var(--tc-migrant-bg); color:var(--tc-migrant-fg); }
   .tc-welfare { background:var(--tc-welfare-bg); color:var(--tc-welfare-fg); }
   .tc-other { background:var(--surface-1); color:var(--text-muted); font-weight:600; }
-  .plan-go { color:var(--green-d); font-size:12px; font-weight:700; white-space:nowrap; opacity:.35; transition:opacity .12s; }
-  .planrow:hover .plan-go { opacity:1; }
-  .dchip { background:#eaf1ff; color:#2a52be; border:1px solid #d3e0fb; padding:2px 9px; border-radius:999px;
-    font-size:12px; font-weight:800; white-space:nowrap; }
-  .dchip-now { background:#ffecec; color:#d9534f; border-color:#f6cccc; }
-  .gauge { margin-top:6px; height:8px; background:var(--surface-1); border-radius:999px; overflow:hidden; max-width:280px; }
-  .gauge-fill { height:100%; background:var(--gauge-ok); border-radius:999px; }
-  .gauge-fill.gauge-full { background:var(--gauge-full); }
+  /* 3단 게이지: 진초록=승인 · 연초록=대기 · 빈 공간=실질 잔여 */
+  .pi-cap { margin-top:7px; display:flex; align-items:center; gap:9px; }
+  .g3 { flex:1; min-width:70px; max-width:300px; height:7px; border-radius:999px;
+    background:var(--surface-1); overflow:hidden; display:flex; }
+  .g3-app { background:var(--gauge-app); }
+  .g3-pend { background:var(--gauge-pend); }
+  .g3-full .g3-app, .g3-full .g3-pend { background:var(--gauge-full); }
+  .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
+  /* 정보 변경 줄 (레일 없는 단순 행) */
+  .chgrow { padding:8px 2px; }
+  .chgrow + .chgrow { border-top:1px solid var(--line); }
   .badge-change { background:#f0e9fb; color:#7c3aed; }
   .badge-unknown { background:#eef0f2; color:#7a848c; }
   .badge-remain { background:#eaf6ef; color:var(--green-d); }
   .badge-full { background:#fdeaea; color:#d9534f; }
-  /* 정원 표시(잔여 중심) — 마감·대기만 빨강, 나머지는 기본 색 */
-  .cap-full { color:var(--gauge-full); font-weight:700; }
-  .cap-remain { font-weight:700; color:var(--ink); }
-  .cap-plain { color:inherit; }
   .permchip { display:inline-flex; align-items:center; gap:6px; background:#eaf6ef; color:var(--green-d);
     border:1px solid #cfe9d8; padding:7px 13px; border-radius:999px; font-size:13px; font-weight:700;
     margin-bottom:14px; }
