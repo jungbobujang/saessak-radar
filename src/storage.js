@@ -29,6 +29,36 @@ const DEFAULT_INSTITUTION = {
   evaluated: false,
 };
 
+// 종합점수 가중치 (합계 100점). 기준을 바꾸고 싶으면 이 표만 고치면 된다.
+//  강사구성 40 + 강사료 20 + 연수 10 + 간식 8 + 종합판정 15 + 하트 7 = 100
+const SCORE_WEIGHTS = {
+  staff: 40, // staffScore / 5 × 40
+  pay: { good: 20, avg: 14, poor: 6 },
+  training: { online: 10, offline: 5 },
+  snack: { yes: 8, unknown: 4, no: 2 },
+  verdict: { redo: 15, ok: 8, skip: 0 },
+  heart: 7,
+};
+
+// 종합점수 0~100. 아직 안 채운 항목은 0점으로 둔다(비율 환산하면 한두 항목만
+// 채운 기관이 과대평가된다). 아예 미평가면 null → 랭킹 맨 아래.
+function scoreOf(r) {
+  if (!r || !isEvaluated(r)) return null;
+  if (r.staffScore === 0) return 0; // 신청 대상 제외 → 무조건 0점
+  let sum = 0;
+  if (r.staffScore != null) sum += (r.staffScore / 5) * SCORE_WEIGHTS.staff;
+  if (r.pay && SCORE_WEIGHTS.pay[r.pay] != null) sum += SCORE_WEIGHTS.pay[r.pay];
+  if (r.training && SCORE_WEIGHTS.training[r.training] != null) {
+    sum += SCORE_WEIGHTS.training[r.training];
+  }
+  if (r.snack && SCORE_WEIGHTS.snack[r.snack] != null) sum += SCORE_WEIGHTS.snack[r.snack];
+  if (r.verdict && SCORE_WEIGHTS.verdict[r.verdict] != null) {
+    sum += SCORE_WEIGHTS.verdict[r.verdict];
+  }
+  if (r.heart) sum += SCORE_WEIGHTS.heart;
+  return Math.max(0, Math.min(100, Math.round(sum)));
+}
+
 const INST_ENUMS = {
   staffScore: [0, 3, 4, 4.5, 5],
   pay: ['good', 'avg', 'poor'],
@@ -54,8 +84,13 @@ const DEFAULT_SETTINGS = {
   notifyStart: true, // 모집 시작 전환 알림
   notifyNew: false, // 신규 모집예정 등록 알림 (플래너 반영은 항상)
   notifyReminder: true, // 오픈 리마인더
-  // 기관 평가 표식을 플래너/최근감지에 노출할지 (기본 OFF — 나만 설정에서 봄)
+  // 기관 평가 표식을 플래너/최근감지에 노출할지 (마스터 스위치, 기본 OFF — 나만 설정에서 봄)
   showRatings: false,
+  // 마스터가 ON 일 때 어떤 표식을 보일지 (개별 선택)
+  showVerdict: true, // 종합판정 색점
+  showStaffScore: true, // 강사구성 별점
+  showHeart: true, // 하트
+  dimSkip: false, // 거르기 기관 카드를 흐리게
 };
 
 function ensureDir() {
@@ -123,7 +158,16 @@ function saveSettings(partial) {
   for (const key of ['programType', 'regions', 'schoolLevels', 'statuses', 'targets']) {
     if (!Array.isArray(next[key])) next[key] = [];
   }
-  for (const key of ['notifyStart', 'notifyNew', 'notifyReminder', 'showRatings']) {
+  for (const key of [
+    'notifyStart',
+    'notifyNew',
+    'notifyReminder',
+    'showRatings',
+    'showVerdict',
+    'showStaffScore',
+    'showHeart',
+    'dimSkip',
+  ]) {
     next[key] = !!next[key];
   }
   writeJson(SETTINGS_PATH, next);
@@ -192,10 +236,16 @@ function getInstitutions() {
     ...(byName[seed.name] || {}),
     name: seed.name,
   }));
+  // 종합점수는 저장하지 않고 읽을 때 계산한다 (가중치를 바꾸면 즉시 반영)
+  for (const r of merged) r.score = scoreOf(r);
   // 시드에서 빠진(이름이 바뀐 등) 저장본도 잃지 않고 뒤에 붙인다
   const seedNames = new Set(INSTITUTION_SEED.map((s) => s.name));
   for (const name of Object.keys(byName)) {
-    if (!seedNames.has(name)) merged.push({ ...DEFAULT_INSTITUTION, ...byName[name] });
+    if (!seedNames.has(name)) {
+      const extra = { ...DEFAULT_INSTITUTION, ...byName[name] };
+      extra.score = scoreOf(extra);
+      merged.push(extra);
+    }
   }
   return merged;
 }
@@ -245,7 +295,8 @@ function saveInstitution(name, patch) {
   next.evaluated = isEvaluated(next);
 
   list[idx] = next;
-  writeJson(INSTITUTIONS_PATH, list);
+  writeJson(INSTITUTIONS_PATH, list.map(({ score, ...rest }) => rest)); // 점수는 파생값이라 저장 안 함
+  next.score = scoreOf(next);
   return next;
 }
 
@@ -254,6 +305,8 @@ module.exports = {
   DEFAULT_SETTINGS,
   DEFAULT_INSTITUTION,
   INST_ENUMS,
+  SCORE_WEIGHTS,
+  scoreOf,
   getInstitutions,
   saveInstitution,
   getSettings,

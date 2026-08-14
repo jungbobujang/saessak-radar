@@ -226,7 +226,7 @@ app.get('/', (req, res) => {
       const hasLink = !!l.link;
       const gonow = hasLink ? '<span class="gonow">↗ 이동</span>' : '';
       // 로그 줄에서는 [운영기관] 프로그램명을 말줄임 처리 (logtitle 에서 ellipsis)
-      const inner = `${badge}${ratingMark(l.institution, s.showRatings)}
+      const inner = `${badge}${ratingOf(l.institution, s).mark}
         <span class="logtitle">${escapeHtml(instLabel(l.institution, l.title))}</span>
         <span class="logtime">${escapeHtml(time)}</span>
         ${gonow}`;
@@ -374,13 +374,21 @@ app.get('/', (req, res) => {
   `));
 });
 
+// 종합점수 내림차순 (미평가는 맨 아래, 동점이면 가나다)
+function sortByScore(a, b) {
+  const av = a.score == null ? -1 : a.score;
+  const bv = b.score == null ? -1 : b.score;
+  if (av !== bv) return bv - av;
+  return a.name.localeCompare(b.name, 'ko');
+}
+
 // ---- 설정 페이지: 기관 평가 섹션 ----
 // 56개 기관을 아코디언으로 펼쳐 평가하고, 표식 노출 여부(showRatings)를 토글한다.
 function institutionsSection(s) {
   const list = institutionsCached();
   const done = list.filter((r) => r.evaluated).length;
 
-  // 접힌 상태 요약: 판정 색점 · ★점수 · 하트
+  // 접힌 상태 요약: 판정 색점 · ★강사구성 · 하트 · 종합점수 배지
   const summaryOf = (r) => {
     if (!r.evaluated) return '<span class="muted small">미평가</span>';
     const bits = [];
@@ -391,6 +399,11 @@ function institutionsSection(s) {
     }
     if (r.staffScore != null) bits.push(`<span class="isc">★${r.staffScore}</span>`);
     if (r.heart) bits.push('<span class="ihe">❤️</span>');
+    if (r.score != null) {
+      bits.push(
+        `<span class="sbadge s-${r.verdict || 'none'}" title="종합점수 ${r.score}/100">${r.score}</span>`
+      );
+    }
     return bits.join(' ');
   };
 
@@ -407,11 +420,16 @@ function institutionsSection(s) {
         .join('')}
     </select>`;
 
-  const rows = list
+  // 기본 정렬: 종합점수 높은 순 (미평가는 아래). 나머지 정렬은 클라이언트에서 재배치.
+  const sorted = list.slice().sort((a, b) => sortByScore(a, b));
+
+  const rows = sorted
     .map(
       (r) => `<details class="irow${r.evaluated ? '' : ' irow-todo'}"
       data-name="${escapeHtml(r.name)}"
-      data-eval="${r.evaluated ? '1' : '0'}" data-verdict="${escapeHtml(r.verdict || '')}">
+      data-eval="${r.evaluated ? '1' : '0'}" data-verdict="${escapeHtml(r.verdict || '')}"
+      data-score="${r.score == null ? -1 : r.score}"
+      data-staff="${r.staffScore == null ? -1 : r.staffScore}">
       <summary>
         <span class="iname">${escapeHtml(r.name)}</span>
         <span class="isum">${summaryOf(r)}</span>
@@ -419,11 +437,11 @@ function institutionsSection(s) {
       <div class="iedit">
         <div class="ifields">
           <label class="ifl">강사구성${sel('staffScore', r.staffScore, [
-            [0, '0 (신청 대상 제외)'],
-            [3, '3'],
-            [4, '4'],
-            [4.5, '4.5'],
             [5, '5'],
+            [4.5, '4.5'],
+            [4, '4'],
+            [3, '3'],
+            [0, '0 (신청 대상 제외)'],
           ])}</label>
           <label class="ifl">강사료${sel('pay', r.pay, [
             ['good', '좋음'],
@@ -477,8 +495,27 @@ function institutionsSection(s) {
         <span>플래너에 표시</span>
       </label>
       <div class="muted small" style="margin-top:8px;">
-        켜면 플래너·최근 감지 카드의 업체명 앞에 <b>🟢재신청 / 🟡보통 / 🔴거르기 · ★강사구성 · ❤️</b>
-        표식이 붙습니다. 끄면 이 설정 페이지에서만 보입니다. (텔레그램 메시지는 영향 없음)
+        켜면 플래너·최근 감지 카드의 업체명 앞에 표식이 붙습니다.
+        끄면 아래 개별 선택과 무관하게 <b>전부 숨김</b>이고, 이 설정 페이지에서만 보입니다.
+        (텔레그램 메시지는 영향 없음)
+      </div>
+      <div class="submarks${s.showRatings ? '' : ' submarks-off'}">
+        <div class="muted small" style="margin-bottom:6px;">표시할 표식 고르기</div>
+        <div class="opts">
+          ${[
+            ['showVerdict', '🟢 종합판정 색점'],
+            ['showStaffScore', '★ 강사구성'],
+            ['showHeart', '❤️ 하트'],
+            ['dimSkip', '🔴 거르기 기관 흐리게'],
+          ]
+            .map(
+              ([key, label]) => `<label class="opt ${s[key] ? 'on' : ''}">
+              <input type="checkbox" class="markopt" data-k="${key}" ${s[key] ? 'checked' : ''}>
+              <span>${label}</span>
+            </label>`
+            )
+            .join('')}
+        </div>
       </div>
       <div class="muted small istats" style="margin-top:10px;">
         전체 <b>${list.length}</b> · 평가완료 <b class="idone">${done}</b> ·
@@ -489,6 +526,13 @@ function institutionsSection(s) {
         <button type="button" class="fchip" data-f="done">평가완료</button>
         <button type="button" class="fchip" data-f="todo">미평가</button>
         <button type="button" class="fchip" data-f="redo">재신청만</button>
+      </div>
+      <div class="ifilters isorts">
+        <span class="muted small" style="align-self:center;">정렬</span>
+        <button type="button" class="fchip on" data-s="score">종합점수 높은 순</button>
+        <button type="button" class="fchip" data-s="staff">강사구성 높은 순</button>
+        <button type="button" class="fchip" data-s="name">가나다 순</button>
+        <button type="button" class="fchip" data-s="done">평가완료 우선</button>
       </div>
       <div class="ilist">${rows}</div>
     </div>`;
@@ -715,10 +759,31 @@ app.get('/settings', requireAuth, (req, res) => {
           } catch (e) { toast('오류: ' + e.message); }
         });
 
+        // 개별 표식 체크박스 (마스터가 OFF면 아무 효과 없음 — 안내를 위해 흐리게만)
+        box.querySelectorAll('.markopt').forEach((cb) => {
+          cb.addEventListener('change', async () => {
+            cb.closest('.opt').classList.toggle('on', cb.checked);
+            var payload = {}; payload[cb.dataset.k] = cb.checked;
+            try {
+              const r = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+              const d = await r.json();
+              toast(d.ok ? '표식 설정 저장됨' : '저장 실패');
+            } catch (e) { toast('오류: ' + e.message); }
+          });
+        });
+        // 마스터 토글에 따라 개별 옵션 영역을 흐리게
+        sw.addEventListener('change', () => {
+          box.querySelector('.submarks').classList.toggle('submarks-off', !sw.checked);
+        });
+
         // 필터 칩
-        box.querySelectorAll('.fchip').forEach((chip) => {
+        box.querySelectorAll('.ifilters:not(.isorts) .fchip').forEach((chip) => {
           chip.addEventListener('click', () => {
-            box.querySelectorAll('.fchip').forEach((c) => c.classList.remove('on'));
+            box.querySelectorAll('.ifilters:not(.isorts) .fchip').forEach((c) => c.classList.remove('on'));
             chip.classList.add('on');
             var f = chip.dataset.f;
             box.querySelectorAll('.irow').forEach((row) => {
@@ -728,6 +793,34 @@ app.get('/settings', requireAuth, (req, res) => {
                 || (f === 'redo' && row.dataset.verdict === 'redo');
               row.hidden = !ok;
             });
+          });
+        });
+
+        // 정렬 칩 — DOM 재배치
+        var listEl = box.querySelector('.ilist');
+        box.querySelectorAll('.isorts .fchip').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            box.querySelectorAll('.isorts .fchip').forEach((c) => c.classList.remove('on'));
+            chip.classList.add('on');
+            var k = chip.dataset.s;
+            var rows = Array.from(box.querySelectorAll('.irow'));
+            rows.sort((a, b) => {
+              var an = a.dataset.name, bn = b.dataset.name;
+              if (k === 'name') return an.localeCompare(bn, 'ko');
+              if (k === 'staff') {
+                var d = (+b.dataset.staff) - (+a.dataset.staff);
+                return d || an.localeCompare(bn, 'ko');
+              }
+              if (k === 'done') {
+                var e = (+b.dataset.eval) - (+a.dataset.eval);
+                if (e) return e;
+                var sd = (+b.dataset.score) - (+a.dataset.score);
+                return sd || an.localeCompare(bn, 'ko');
+              }
+              var s2 = (+b.dataset.score) - (+a.dataset.score);
+              return s2 || an.localeCompare(bn, 'ko');
+            });
+            rows.forEach((r) => listEl.appendChild(r));
           });
         });
 
@@ -773,6 +866,8 @@ app.get('/settings', requireAuth, (req, res) => {
         function applySaved(row, r) {
           row.dataset.eval = r.evaluated ? '1' : '0';
           row.dataset.verdict = r.verdict || '';
+          row.dataset.score = r.score == null ? -1 : r.score;
+          row.dataset.staff = r.staffScore == null ? -1 : r.staffScore;
           row.classList.toggle('irow-todo', !r.evaluated);
           var DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
           var LBL = { redo: '재신청', ok: '보통', skip: '거르기' };
@@ -784,6 +879,7 @@ app.get('/settings', requireAuth, (req, res) => {
             if (DOT[r.verdict]) bits.push('<span class="vchip v-' + r.verdict + '">' + DOT[r.verdict] + ' ' + LBL[r.verdict] + '</span>');
             if (r.staffScore !== null && r.staffScore !== undefined) bits.push('<span class="isc">★' + r.staffScore + '</span>');
             if (r.heart) bits.push('<span class="ihe">❤️</span>');
+            if (r.score !== null && r.score !== undefined) bits.push('<span class="sbadge s-' + (r.verdict || 'none') + '" title="종합점수 ' + r.score + '/100">' + r.score + '</span>');
             html = bits.join(' ');
           }
           row.querySelector('.isum').innerHTML = html;
@@ -1127,17 +1223,22 @@ const PAY_LABEL = { good: '강사료 좋음', avg: '강사료 평균', poor: '�
 const TRAINING_LABEL = { online: '온라인 연수', offline: '오프라인 연수' };
 const SNACK_LABEL = { yes: '간식 줌', no: '간식 안 줌', unknown: '간식 모름' };
 
-// 업체명 앞에 붙는 표식 (설정 showRatings 가 ON 이고 평가된 기관일 때만)
-// 미평가·매칭 실패면 빈 문자열 → 카드는 아무 영향 없이 그대로 그려진다.
-function ratingMark(institution, show) {
-  if (!show) return '';
+// 업체명 앞 표식 + 카드 흐리게 여부.
+//  · 마스터 스위치(showRatings)가 OFF면 개별 옵션과 무관하게 전부 숨김
+//  · 개별 옵션(showVerdict/showStaffScore/showHeart)으로 고른 표식만 노출
+//  · dimSkip 이 ON이면 '거르기' 기관 카드를 흐리게 (숨기지는 않음)
+// 미평가·매칭 실패면 표식 없음 → 카드는 아무 영향 없이 그대로 그려진다.
+function ratingOf(institution, s) {
+  const off = { mark: '', dim: false };
+  if (!s || !s.showRatings) return off;
   const r = lookupInstitution(institution);
-  if (!r || !r.evaluated) return '';
+  if (!r || !r.evaluated) return off;
+  const dim = !!(s.dimSkip && r.verdict === 'skip');
   const bits = [];
-  if (VERDICT_DOT[r.verdict]) bits.push(VERDICT_DOT[r.verdict]);
-  if (r.staffScore != null) bits.push('★' + r.staffScore);
-  if (r.heart) bits.push('❤️');
-  if (!bits.length) return '';
+  if (s.showVerdict && VERDICT_DOT[r.verdict]) bits.push(VERDICT_DOT[r.verdict]);
+  if (s.showStaffScore && r.staffScore != null) bits.push('★' + r.staffScore);
+  if (s.showHeart && r.heart) bits.push('❤️');
+  if (!bits.length) return { mark: '', dim };
   const tip = [
     VERDICT_LABEL[r.verdict],
     r.staffScore != null ? '강사구성 ' + r.staffScore : '',
@@ -1149,7 +1250,8 @@ function ratingMark(institution, show) {
   ]
     .filter(Boolean)
     .join(' · ');
-  return `<span class="imark" title="${escapeHtml(tip)}">${bits.join('')}</span>`;
+  const mark = `<span class="imark" title="${escapeHtml(tip)}">${bits.join('')}</span>`;
+  return { mark, dim };
 }
 
 // Tabler 아이콘을 인라인 SVG 로 넣는다.
@@ -1338,10 +1440,10 @@ function targetChipsHtml(x) {
 }
 
 // 카드 1행: [기관 평가 표식] [업체명] 프로그램명 + 우측 chevron
-function cardHead(x, showRatings) {
+function cardHead(x, s) {
   const inst = String(x.institution || '').trim();
   return `<div class="pi-head">
-      ${ratingMark(inst, showRatings)}
+      ${ratingOf(inst, s).mark}
       ${inst ? `<span class="pi-inst">[${escapeHtml(inst)}]</span>` : ''}
       <span class="pi-name">${escapeHtml(x.title || '')}</span>
       <span class="pi-go" aria-hidden="true">${icon('chevron-right')}</span>
@@ -1350,7 +1452,7 @@ function cardHead(x, showRatings) {
 
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
 function renderPlanner() {
-  const showRatings = !!storage.getSettings().showRatings;
+  const s = storage.getSettings();
   const state = storage.getState();
   const details = storage.getDetails();
   const ids = Object.keys(state);
@@ -1397,10 +1499,13 @@ function renderPlanner() {
         : preOpen
         ? `<div class="pi-cap"><span class="metabit">${icon('users')}${c.cap}학급 오픈 전</span></div>`
         : gaugeHtml(c);
-      return `<a class="planrow" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
+      const rate = ratingOf(x.institution, s);
+      return `<a class="planrow ${rate.dim ? 'planrow-skip' : ''}" href="${escapeHtml(
+        x.link || '#'
+      )}" target="_blank" rel="noopener">
         ${railDdayHtml(dd)}
         <div class="pi-body">
-          ${cardHead(x, showRatings)}
+          ${cardHead(x, s)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
           ${capRow}
         </div>
@@ -1416,12 +1521,13 @@ function renderPlanner() {
       const metaHtml = [chaptersHtml(x), dateHtml(end, '~')]
         .filter(Boolean)
         .join('<span class="metasep">·</span>');
-      return `<a class="planrow ${c && c.full ? 'planrow-dim' : ''}" href="${escapeHtml(
-        x.link || '#'
-      )}" target="_blank" rel="noopener">
+      const rate = ratingOf(x.institution, s);
+      return `<a class="planrow ${c && c.full ? 'planrow-dim' : ''} ${
+        rate.dim ? 'planrow-skip' : ''
+      }" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         ${railHtml(c)}
         <div class="pi-body">
-          ${cardHead(x, showRatings)}
+          ${cardHead(x, s)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
           ${gaugeHtml(c)}
         </div>
@@ -1654,6 +1760,17 @@ function pageShell(title, body) {
   .v-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
   .v-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
   .isc { font-size:12px; font-weight:800; color:var(--text-secondary); }
+  /* 종합점수 배지 — 판정 색을 따라간다 */
+  .sbadge { font-size:11.5px; font-weight:800; padding:2px 8px; border-radius:8px;
+    min-width:32px; text-align:center; background:var(--surface-1); color:var(--text-secondary); }
+  .s-redo { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
+  .s-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
+  .s-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  /* 개별 표식 선택 — 마스터가 OFF면 흐리게(끄지는 않음, 미리 골라둘 수 있게) */
+  .submarks { margin-top:12px; }
+  .submarks-off { opacity:.45; }
+  /* 거르기 기관 카드 흐리게 (dimSkip) */
+  .planrow-skip { opacity:.6; }
   .iedit { padding:4px 2px 14px; }
   .ifields { display:flex; flex-wrap:wrap; gap:10px 14px; }
   .ifl { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-secondary);
