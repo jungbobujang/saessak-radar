@@ -971,10 +971,17 @@ function railDdayHtml(dd) {
       <div class="rail-label">오늘 오픈</div></div>`;
   }
   return `<div class="rail rail-dday"><div class="rail-num">D-${dd}</div>
-      <div class="rail-label">뒤 오픈</div></div>`;
+      <div class="rail-label">오픈까지</div></div>`;
 }
 
-// 3단 게이지 + 우측 수치 텍스트 ("N정원 · 승인n · 대기k")
+// 게이지 우측 수치 텍스트. 숫자와 라벨을 띄워 읽기 쉽게, 대기 0이면 항목 자체를 뺀다.
+function capText(c) {
+  const parts = [`정원 ${c.cap}`, `승인 ${c.app}`];
+  if (c.pend > 0) parts.push(`대기 ${c.pend}`);
+  return parts.join(' · ');
+}
+
+// 3단 게이지 + 우측 수치 텍스트 ("정원 13 · 승인 5 · 대기 1")
 //  진초록=승인 · 연초록=대기 · 빈 공간=실질 잔여 / 실질 잔여 0이면 전체 빨강
 function gaugeHtml(c) {
   if (!c) return '';
@@ -985,14 +992,15 @@ function gaugeHtml(c) {
         <div class="g3-pend" style="width:${c.pendPct}%"></div>
       </div>`;
   return `<div class="pi-cap">${bar}
-      <span class="g3-text">${c.cap}정원 · 승인${c.app} · 대기${c.pend}</span>
+      <span class="g3-text">${capText(c)}</span>
     </div>`;
 }
 
-// 교육대상 색칩 (B안 — 우리 학교 해당 대상만 강조, 나머지는 회색으로 누름)
-//  · 정렬: 우리 학교 대상 먼저, 그 외는 뒤 (각 그룹 안에서는 원래 순서 유지)
-//  · 최대 3개까지 노출 + 초과분은 회색 '외 N'.
-//    단 우리 학교 대상이 3개를 넘더라도 그 칩들은 잘리지 않는다.
+// 교육대상 색칩 — 우리 학교 해당 대상(TARGET_MINE)만 진한 색칩으로 노출하고,
+// 그 외 대상은 개별 칩으로 늘어놓지 않고 개수만 회색 '외 N' 으로 접는다.
+//  · 화면에는 [진한 색칩들] + [회색 '외 N'] 만 남는다 (회색 개별칩 없음)
+//  · 우리 대상이 하나도 없고 그 외만 있으면 '외 N' 만 표시
+//  · '외 N' 에 마우스를 올리면 접힌 대상 전체 이름이 뜬다
 //  · 상세의 신청대상을 우선 쓰고 없으면 목록 태그. 여기 한 곳에서만 만들어 중복 표기를 막는다.
 function targetChipsHtml(x) {
   const names =
@@ -1012,18 +1020,17 @@ function targetChipsHtml(x) {
 
   const mine = items.filter((i) => i.mine);
   const rest = items.filter((i) => !i.mine);
-  const ordered = mine.concat(rest);
-  const limit = Math.max(3, mine.length); // 우리 학교 대상은 잘리지 않게
-  const shown = ordered.slice(0, limit);
-  const hidden = ordered.length - shown.length;
 
-  const chips = shown.map(
+  const chips = mine.map(
     (i) =>
-      `<span class="tchip ${i.mine ? i.cls : 'tc-other'}" title="${escapeHtml(i.full)}">${escapeHtml(
-        i.label
-      )}</span>`
+      `<span class="tchip ${i.cls}" title="${escapeHtml(i.full)}">${escapeHtml(i.label)}</span>`
   );
-  if (hidden > 0) chips.push(`<span class="tchip tc-other">외 ${hidden}</span>`);
+  if (rest.length) {
+    const tip = rest.map((i) => i.full).join(', ');
+    chips.push(
+      `<span class="tchip tc-other" title="${escapeHtml(tip)}">외 ${rest.length}</span>`
+    );
+  }
   return `<span class="tchips">${chips.join('')}</span>`;
 }
 
@@ -1175,8 +1182,9 @@ function pageShell(title, body) {
     --surface-2:#ffffff;   /* 카드 배경 */
     --text-secondary:#5c6b62;
     --text-muted:#8a988f;
-    /* 정원 게이지 — 진초록=승인 · 연초록=대기 · 빨강=실질 잔여 0 */
-    --gauge-ok:#1D9E75; --gauge-app:#1D9E75; --gauge-pend:#9FE1CB; --gauge-full:#E24B4A;
+    /* 정원 게이지 — 진초록=승인 · 주황=대기 · 빈 배경=실질 잔여 · 빨강=실질 잔여 0
+       (대기를 연초록으로 두면 승인과 붙어 보여서 색상 계열 자체를 분리했다) */
+    --gauge-ok:#1D9E75; --gauge-app:#1D9E75; --gauge-pend:#EF9F27; --gauge-full:#E24B4A;
     /* 좌측 잔여 레일 (여유 / 임박 / 마감·대기만 / D-day) */
     --rail-ok-bg:#E1F5EE;   --rail-ok-fg:#085041;
     --rail-soon-bg:#FAEEDA; --rail-soon-fg:#633806;
@@ -1201,7 +1209,7 @@ function pageShell(title, body) {
       --rail-soon-bg:#4A3410; --rail-soon-fg:#F6DFB4;
       --rail-full-bg:#4A1A1A; --rail-full-fg:#F5C4C4;
       --rail-dday-bg:#1B2F55; --rail-dday-fg:#C3D6F7;
-      --gauge-pend:#3E7C68;
+      --gauge-pend:#D18A1A;
     }
   }
   * { box-sizing: border-box; }
