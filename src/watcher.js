@@ -86,27 +86,36 @@ function withInst(institution, title) {
 }
 
 // ---- 감시 조건 판정 ----
+//
+// 판정 규칙 (설정 UI 안내문과 동일):
+//  · 카테고리 안 = 합집합(OR). 체크한 값 중 하나라도 카드에 있으면 통과.
+//    → 여러 개 체크하면 조건이 좁아지는 게 아니라 '넓어진다'.
+//  · 카테고리 사이 = AND. 5개 카테고리를 모두 통과해야 최종 통과.
+//  · 빈 배열(전부 해제) = 조건 없음 → 그 카테고리는 전체 통과.
+//  · 프로그램 수준(기본/특화/AI특화)은 조건에서 제외 → 전부 통과.
+//    수준은 프로그램당 하나뿐이라 여러 개를 AND 로 걸면 0건이 되는 사이트 동작 때문.
+//    훗날 노출한다면 단일 선택(라디오) + 기본값 '전체' 로 만들 것.
 function matchesSettings(card, settings) {
   // 모집 완료는 항상 제외
   if (card.status === '모집 완료') return false;
 
-  // 상태 필터
+  // 모집상태: 카드 값(단일)이 체크 목록에 포함되면 통과 (OR)
   if (settings.statuses.length && !settings.statuses.includes(card.status)) {
     return false;
   }
 
-  // 프로그램 유형: 카드 값이 체크 목록에 포함
+  // 프로그램 유형: 카드 값(단일)이 체크 목록에 포함되면 통과 (OR)
   if (settings.programType.length) {
     if (!card.type || !settings.programType.includes(card.type)) return false;
   }
 
-  // 운영권역: 카드 권역(복수 가능) 중 하나라도 체크 목록에 포함되면 통과
+  // 운영권역: 카드 권역(복수 가능) 중 하나라도 체크 목록에 포함되면 통과 (OR)
   if (settings.regions.length) {
     const hit = (card.regions || []).some((r) => settings.regions.includes(r));
     if (!hit) return false;
   }
 
-  // 학교급: 카드 학교급(복수 가능) 중 하나라도 체크 목록에 포함되면 통과
+  // 학교급: 카드 학교급(복수 가능) 중 하나라도 체크 목록에 포함되면 통과 (OR)
   if (settings.schoolLevels.length) {
     const hit = (card.levels || []).some((l) => settings.schoolLevels.includes(l));
     if (!hit) return false;

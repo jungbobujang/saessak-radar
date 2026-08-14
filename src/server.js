@@ -386,15 +386,31 @@ app.get('/settings', requireAuth, (req, res) => {
 
   const has = (arr, v) => arr.includes(v);
 
+  // 모든 조건 카테고리는 합집합(OR) 판정이다.
+  // 체크를 늘릴수록 조건이 '넓어져' 더 많이 잡힌다는 걸 카드마다 명시해 오조작을 막는다.
+  const orTag = (extra) =>
+    `<span class="muted small">(여러 개 선택 = 넓어짐 · OR${extra ? ' · ' + extra : ''})</span>`;
+
   res.send(pageShell('감시 조건 설정', `
     <div class="header">
       <div class="logo">🌱 감시 조건 설정</div>
       <a class="navlink" href="/">← 대시보드</a>
     </div>
 
+    <div class="card" style="border-left:3px solid #2f855a;">
+      <div class="card-title">조건 판정 방식</div>
+      <div class="muted small">
+        아래 5개 카테고리는 모두 <b>합집합(OR)</b> 입니다 — 체크한 값 중 <b>하나라도</b> 카드에 있으면 통과.
+        여러 개를 체크하면 조건이 <b>좁아지는 게 아니라 넓어집니다</b>.<br>
+        카테고리끼리는 AND 로 묶입니다 (예: 유형 통과 <b>그리고</b> 권역 통과 …).
+        한 카테고리를 전부 해제하면 그 항목은 <b>조건 없음(전체 통과)</b> 으로 처리됩니다.<br>
+        <b>프로그램 수준</b>(기본 / 특화 / AI특화) 은 감시 조건에서 <b>제외</b> 되어 전부 통과합니다.
+      </div>
+    </div>
+
     <form id="settingsForm">
       <div class="card" id="conditions" style="scroll-margin-top:16px;">
-        <div class="card-title">프로그램 유형</div>
+        <div class="card-title">프로그램 유형 ${orTag()}</div>
         <div class="opts">
           ${cb('programType', '방문형', '방문형', has(s.programType, '방문형'))}
           ${cb('programType', '집합형', '집합형', has(s.programType, '집합형'))}
@@ -402,7 +418,7 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
 
       <div class="card">
-        <div class="card-title">학교급</div>
+        <div class="card-title">학교급 ${orTag()}</div>
         <div class="opts">
           ${cb('schoolLevels', '초등학교', '초등학교', has(s.schoolLevels, '초등학교'))}
           ${cb('schoolLevels', '중학교', '중학교', has(s.schoolLevels, '중학교'))}
@@ -411,7 +427,7 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
 
       <div class="card">
-        <div class="card-title">운영권역</div>
+        <div class="card-title">운영권역 ${orTag()}</div>
         <div class="opts">
           ${cb('regions', '서울·인천권', '서울·인천권', has(s.regions, '서울·인천권'))}
           ${cb('regions', '경기권', '경기권', has(s.regions, '경기권'))}
@@ -422,7 +438,7 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
 
       <div class="card">
-        <div class="card-title">모집상태</div>
+        <div class="card-title">모집상태 ${orTag()}</div>
         <div class="opts">
           ${cb('statuses', '모집 예정', '모집 예정 (신규 등록 감지)', has(s.statuses, '모집 예정'))}
           ${cb('statuses', '모집 중', '모집 중 (전환 감지)', has(s.statuses, '모집 중'))}
@@ -430,7 +446,7 @@ app.get('/settings', requireAuth, (req, res) => {
       </div>
 
       <div class="card">
-        <div class="card-title">교육대상 <span class="muted small">(OR — 하나라도 있으면 통과 · 마우스를 올리면 전체 이름)</span></div>
+        <div class="card-title">교육대상 ${orTag('마우스를 올리면 전체 이름')}</div>
         <div class="opts">
           ${classify.CATEGORIES.map((c) => {
             const checked = has(s.targets, c.full);
