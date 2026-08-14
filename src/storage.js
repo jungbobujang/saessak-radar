@@ -20,7 +20,8 @@ const DEFAULT_INSTITUTION = {
   name: '',
   staffScore: null, // 강사구성: 0 | 3 | 4 | 4.5 | 5 | null
   pay: null, // 강사료: good | avg | poor | null
-  training: null, // 연수: online | offline | null
+  training: null, // 연수(참고, 점수 미반영): live | video | live_then_video | null
+  //         (구 표기 online/offline 도 그대로 보존한다)
   snack: null, // 간식: yes | no | unknown | null
   heart: false, // 정성 호감
   verdict: null, // 종합: redo | ok | skip | null
@@ -29,15 +30,17 @@ const DEFAULT_INSTITUTION = {
   evaluated: false,
 };
 
-// 종합점수 가중치 (합계 100점). 기준을 바꾸고 싶으면 이 표만 고치면 된다.
-//  강사구성 40 + 강사료 20 + 연수 10 + 간식 8 + 종합판정 15 + 하트 7 = 100
+// 종합점수 가중치 (최대 합계 100점). 기준을 바꾸고 싶으면 이 표만 고치면 된다.
+//  강사구성 42 + 강사료 23 + 종합판정 15 + 하트 12 + 간식 8 = 100
+//  우선순위: 강사구성 > 강사료 > 종합판정 · 하트 > 간식 > 연수(0)
+//  연수는 2026 개편 이후 점수에 반영하지 않는다 — 대시보드에는 '참고' 항목으로만 남는다.
 const SCORE_WEIGHTS = {
-  staff: 40, // staffScore / 5 × 40
-  pay: { good: 20, avg: 14, poor: 6 },
-  training: { online: 10, offline: 5 },
-  snack: { yes: 8, unknown: 4, no: 2 },
+  staff: 42, // staffScore / 5 × 42
+  pay: { good: 23, avg: 16, poor: 7 },
   verdict: { redo: 15, ok: 8, skip: 0 },
-  heart: 7,
+  heart: 12,
+  snack: { yes: 8, unknown: 4, no: 2 },
+  training: null, // 점수 미반영 (참고용 항목)
 };
 
 // 종합점수 0~100. 아직 안 채운 항목은 0점으로 둔다(비율 환산하면 한두 항목만
@@ -48,9 +51,7 @@ function scoreOf(r) {
   let sum = 0;
   if (r.staffScore != null) sum += (r.staffScore / 5) * SCORE_WEIGHTS.staff;
   if (r.pay && SCORE_WEIGHTS.pay[r.pay] != null) sum += SCORE_WEIGHTS.pay[r.pay];
-  if (r.training && SCORE_WEIGHTS.training[r.training] != null) {
-    sum += SCORE_WEIGHTS.training[r.training];
-  }
+  // 연수(training)는 의도적으로 계산하지 않는다 — 참고 항목
   if (r.snack && SCORE_WEIGHTS.snack[r.snack] != null) sum += SCORE_WEIGHTS.snack[r.snack];
   if (r.verdict && SCORE_WEIGHTS.verdict[r.verdict] != null) {
     sum += SCORE_WEIGHTS.verdict[r.verdict];
@@ -62,7 +63,9 @@ function scoreOf(r) {
 const INST_ENUMS = {
   staffScore: [0, 3, 4, 4.5, 5],
   pay: ['good', 'avg', 'poor'],
-  training: ['online', 'offline'],
+  // 연수 형태. 앞 3개가 현행 선택지이고, online/offline 은 예전에 저장된 값이라
+  // 지우지 않고 계속 허용한다(사용자가 다시 고르기 전까지 값이 사라지지 않게).
+  training: ['live', 'video', 'live_then_video', 'online', 'offline'],
   snack: ['yes', 'no', 'unknown'],
   verdict: ['redo', 'ok', 'skip'],
 };

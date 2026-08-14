@@ -448,10 +448,24 @@ function institutionsSection(s) {
             ['avg', '평균'],
             ['poor', '아쉬움'],
           ])}</label>
-          <label class="ifl">연수${sel('training', r.training, [
-            ['online', '온라인'],
-            ['offline', '오프라인'],
-          ])}</label>
+          <label class="ifl" title="참고용 항목입니다 — 종합점수에 반영되지 않습니다">
+            연수 <span class="noscore">참고·점수 미반영</span>
+            ${sel(
+              'training',
+              r.training,
+              [
+                ['live', '라이브'],
+                ['video', '동영상'],
+                ['live_then_video', '초반 라이브→후반 동영상'],
+              ]
+                // 예전에 저장해 둔 값(온라인/오프라인)이 있으면 지워지지 않게 선택지에 남긴다
+                .concat(
+                  r.training === 'online' || r.training === 'offline'
+                    ? [[r.training, r.training === 'online' ? '온라인(구 표기)' : '오프라인(구 표기)']]
+                    : []
+                )
+            )}
+          </label>
           <label class="ifl">간식${sel('snack', r.snack, [
             ['yes', '줌'],
             ['no', '안 줌'],
@@ -520,6 +534,14 @@ function institutionsSection(s) {
       <div class="muted small istats" style="margin-top:10px;">
         전체 <b>${list.length}</b> · 평가완료 <b class="idone">${done}</b> ·
         미평가 <b class="itodo">${list.length - done}</b>
+      </div>
+      <div class="muted small" style="margin-top:4px;">
+        종합점수(100점) = 강사구성 ${storage.SCORE_WEIGHTS.staff} ·
+        강사료 ${storage.SCORE_WEIGHTS.pay.good} ·
+        종합판정 ${storage.SCORE_WEIGHTS.verdict.redo} ·
+        하트 ${storage.SCORE_WEIGHTS.heart} ·
+        간식 ${storage.SCORE_WEIGHTS.snack.yes} · <b>연수 0(미반영)</b>
+        &nbsp;/&nbsp; 강사구성 0은 무조건 0점
       </div>
       <div class="ifilters">
         <button type="button" class="fchip on" data-f="all">전체</button>
@@ -1220,7 +1242,14 @@ function lookupInstitution(institution) {
 const VERDICT_DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
 const VERDICT_LABEL = { redo: '재신청', ok: '보통', skip: '거르기' };
 const PAY_LABEL = { good: '강사료 좋음', avg: '강사료 평균', poor: '강사료 아쉬움' };
-const TRAINING_LABEL = { online: '온라인 연수', offline: '오프라인 연수' };
+const TRAINING_LABEL = {
+  live: '연수 라이브',
+  video: '연수 동영상',
+  live_then_video: '연수 초반 라이브→후반 동영상',
+  // 구 표기 (다시 고르기 전까지 그대로 보여준다)
+  online: '연수 온라인(구)',
+  offline: '연수 오프라인(구)',
+};
 const SNACK_LABEL = { yes: '간식 줌', no: '간식 안 줌', unknown: '간식 모름' };
 
 // 업체명 앞 표식 + 카드 흐리게 여부.
@@ -1760,6 +1789,9 @@ function pageShell(title, body) {
   .v-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
   .v-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
   .isc { font-size:12px; font-weight:800; color:var(--text-secondary); }
+  /* 점수에 반영되지 않는 참고 항목 표시 */
+  .noscore { font-size:10px; font-weight:700; color:var(--text-muted); background:var(--surface-1);
+    border-radius:6px; padding:1px 6px; margin-left:2px; }
   /* 종합점수 배지 — 판정 색을 따라간다 */
   .sbadge { font-size:11.5px; font-weight:800; padding:2px 8px; border-radius:8px;
     min-width:32px; text-align:center; background:var(--surface-1); color:var(--text-secondary); }
