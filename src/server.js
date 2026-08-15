@@ -527,10 +527,10 @@ function institutionsSection(s) {
         <div class="muted small" style="margin-bottom:6px;">표시할 표식 고르기</div>
         <div class="opts">
           ${[
-            ['showVerdict', `${markDot('strong')} 종합판정 색점`],
-            ['showStaffScore', `<span class="imk-star">${icon('star-filled', 11)}</span> 강사구성`],
+            ['showVerdict', `${markVerdict('strong')} 판정 문구 배지`],
+            ['showScore', `<span class="imk-score">100점</span> 종합점수`],
             ['showHeart', `${markHeart()} 승인 잘해줌`],
-            ['dimSkip', `${markDot('no')} 비추천 기관 흐리게`],
+            ['dimSkip', `${markVerdict('no')} 기관 흐리게`],
           ]
             .map(
               ([key, label]) => `<label class="opt ${s[key] ? 'on' : ''}">
@@ -1275,7 +1275,7 @@ const SNACK_LABEL = { twice: '간식 2번 이상', once: '간식 1번', no: '간
 
 // 업체명 앞 표식 + 카드 흐리게 여부.
 //  · 마스터 스위치(showRatings)가 OFF면 개별 옵션과 무관하게 전부 숨김
-//  · 개별 옵션(showVerdict/showStaffScore/showHeart)으로 고른 표식만 노출
+//  · 개별 옵션(showVerdict/showScore/showHeart)으로 고른 표식만 노출
 //  · dimSkip 이 ON이면 '비추천' 기관 카드를 흐리게 (숨기지는 않음)
 // 미평가·매칭 실패면 표식 없음 → 카드는 아무 영향 없이 그대로 그려진다.
 function ratingOf(institution, s) {
@@ -1284,10 +1284,11 @@ function ratingOf(institution, s) {
   const r = lookupInstitution(institution);
   if (!r || !r.evaluated) return off;
   const dim = !!(s.dimSkip && r.verdict === 'no');
-  // 표식 순서: 색점 → 별점 → 하트 (CSS gap 4px 로 사이 간격 정돈)
+  // 표식 순서: 판정 배지 → 종합점수 → 하트 (CSS gap 4px 로 사이 간격 정돈)
+  // 강사구성 원점수(★N)는 종합점수에 이미 들어가 있어 카드에서는 따로 보이지 않는다.
   const bits = [];
-  if (s.showVerdict) bits.push(markDot(r.verdict));
-  if (s.showStaffScore && r.staffScore != null) bits.push(markStar(r.staffScore));
+  if (s.showVerdict) bits.push(markVerdict(r.verdict));
+  if (s.showScore && r.score != null) bits.push(markScore(r.score));
   if (s.showHeart && r.heart) bits.push(markHeart());
   if (!bits.filter(Boolean).length) return { mark: '', dim };
   const tip = [
@@ -1325,7 +1326,7 @@ const ICON_PATHS = {
     '<path d="M4 11h16"/><path d="M8 15h2v2h-2z"/>',
   // ti-chevron-right
   'chevron-right': '<path d="M9 6l6 6l-6 6"/>',
-  // ti-star-filled — 기관 평가 '강사구성' 표식 (이모지 ★ 대체)
+  // ti-star-filled — 설정 화면 기관 목록의 '강사구성' 요약 (카드 표식에는 안 쓴다)
   'star-filled':
     '<path d="M8.243 7.34l-6.38 .925l-.113 .023a1 1 0 0 0 -.44 1.684l4.622 4.499l-1.09 6.355' +
     'l-.013 .11a1 1 0 0 0 1.464 .944l5.706 -3l5.693 3l.1 .046a1 1 0 0 0 1.352 -1.1l-1.091 -6.355' +
@@ -1354,6 +1355,18 @@ function icon(name, size = 13) {
 function markDot(verdict) {
   if (!VERDICT_LABEL[verdict]) return '';
   return `<span class="imk-dot imk-${verdict}" title="${VERDICT_LABEL[verdict]}"></span>`;
+}
+// 판정 문구 배지 — 카드에서는 색점 대신 이걸 쓴다(색만으로는 뜻이 안 읽히므로)
+function markVerdict(verdict) {
+  const label = VERDICT_LABEL[verdict];
+  if (!label) return '';
+  return `<span class="vbadge vb-${verdict}" title="${label}">${label}</span>`;
+}
+// 종합점수 — 100점 만점(강사구성·강사료·운영·교구·간식 합산)
+const SCORE_TIP = '종합점수 %s점 (강사구성·강사료·운영·교구·간식 합산)';
+function markScore(score) {
+  const tip = SCORE_TIP.replace('%s', String(score));
+  return `<span class="imk-score" title="${escapeHtml(tip)}">${escapeHtml(String(score))}점</span>`;
 }
 // 강사구성 점수 → "45점 (주+보조 학교, 안전만 외부)" 형태의 설명
 function staffText(score) {
@@ -1548,16 +1561,12 @@ function legendHtml(s) {
   const items = [];
   if (s.showVerdict) {
     items.push(
-      `<span class="lg">${markDot('strong')}강력추천</span>`,
-      `<span class="lg">${markDot('ok')}추천</span>`,
-      `<span class="lg">${markDot('no')}비추천</span>`,
+      `<span class="lg">${markVerdict('strong')}${markVerdict('ok')}${markVerdict('no')}</span>`,
       '<span class="lg-note">(종합판정)</span>'
     );
   }
-  if (s.showStaffScore) {
-    items.push(
-      `<span class="lg"><span class="imk-star">${icon('star-filled', 11)}</span>강사구성</span>`
-    );
+  if (s.showScore) {
+    items.push(`<span class="lg"><span class="imk-score">100점</span>종합점수</span>`);
   }
   if (s.showHeart) {
     items.push(
@@ -1732,6 +1741,10 @@ function pageShell(title, body) {
     --mk-ok:#EF9F27;   --mk-ok-ring:#FBEED5;
     --mk-no:#E24B4A; --mk-no-ring:#FCE4E3;
     --mk-star:#B7791F; --mk-heart:#E0567B;
+    /* 판정 문구 배지 (카드 표식) */
+    --vb-strong-bg:#E1F5EE; --vb-strong-fg:#0A6B52;
+    --vb-ok-bg:#FBEED5;     --vb-ok-fg:#8A5A08;
+    --vb-no-bg:#FCE4E3;     --vb-no-fg:#8A241F;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -1751,6 +1764,10 @@ function pageShell(title, body) {
       /* 표식: 점 색은 그대로 두고 테두리만 어둡게 (밝은 링은 다크에서 튄다) */
       --mk-strong-ring:#123A30; --mk-ok-ring:#43350F; --mk-no-ring:#45201F;
       --mk-star:#D9A64A; --mk-heart:#EF7C9C;
+      /* 판정 배지도 배경은 어둡게, 글자는 밝게 뒤집는다 */
+      --vb-strong-bg:#0E4034; --vb-strong-fg:#B7E7D6;
+      --vb-ok-bg:#4A3410;     --vb-ok-fg:#F6DFB4;
+      --vb-no-bg:#4A1A1A;     --vb-no-fg:#F5C4C4;
     }
   }
   * { box-sizing: border-box; }
@@ -1867,9 +1884,18 @@ function pageShell(title, body) {
   .g3-pend { background:var(--gauge-pend); }
   .g3-full .g3-app, .g3-full .g3-pend { background:var(--gauge-full); }
   .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
-  /* 기관 평가 표식 (업체명 앞) — 색점 → 별점 → 하트, 사이 4px */
+  /* 기관 평가 표식 (업체명 앞) — 판정 배지 → 종합점수 → 하트, 사이 4px */
   .imark { flex:none; display:inline-flex; align-items:center; gap:4px; cursor:help; }
-  /* 종합판정 색점: 7px 원 + 같은 계열 연한색 테두리 효과 */
+  /* 판정 문구 배지 — 색만으로는 뜻이 안 읽혀서 카드에는 글자를 그대로 쓴다 */
+  .vbadge { flex:none; font-size:10.5px; font-weight:600; line-height:1.5; padding:2px 8px;
+    border-radius:5px; white-space:nowrap; }
+  .vb-strong { background:var(--vb-strong-bg); color:var(--vb-strong-fg); }
+  .vb-ok     { background:var(--vb-ok-bg);     color:var(--vb-ok-fg); }
+  .vb-no     { background:var(--vb-no-bg);     color:var(--vb-no-fg); }
+  /* 종합점수 (100점 만점) */
+  .imk-score { flex:none; font-size:11px; font-weight:600; color:var(--text-secondary);
+    letter-spacing:-0.01em; white-space:nowrap; }
+  /* 종합판정 색점: 7px 원 + 같은 계열 연한색 테두리 효과 (설정 화면 요약칩에서 사용) */
   .imk-dot { flex:none; width:7px; height:7px; border-radius:50%; margin:0 1px; }
   .imk-strong { background:var(--mk-strong); box-shadow:0 0 0 2px var(--mk-strong-ring); }
   .imk-ok   { background:var(--mk-ok);   box-shadow:0 0 0 2px var(--mk-ok-ring); }
@@ -1928,7 +1954,7 @@ function pageShell(title, body) {
   .submarks { margin-top:12px; }
   .submarks-off { opacity:.45; }
   /* 비추천 기관 카드 흐리게 (dimSkip) */
-  .planrow-skip { opacity:.6; }
+  .planrow-skip { opacity:.65; }
   .iedit { padding:4px 2px 14px; }
   .ifields { display:flex; flex-wrap:wrap; gap:10px 14px; }
   .ifl { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-secondary);

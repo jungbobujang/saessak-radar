@@ -148,8 +148,8 @@ const DEFAULT_SETTINGS = {
   // 기관 평가 표식을 플래너/최근감지에 노출할지 (마스터 스위치, 기본 OFF — 나만 설정에서 봄)
   showRatings: false,
   // 마스터가 ON 일 때 어떤 표식을 보일지 (개별 선택)
-  showVerdict: true, // 종합판정 색점
-  showStaffScore: true, // 강사구성 별점
+  showVerdict: true, // 판정 문구 배지 (강력추천/추천/비추천)
+  showScore: true, // 종합점수 (100점 만점) — 구 showStaffScore(★강사구성)를 대체
   showHeart: true, // 하트
   dimSkip: false, // 비추천 기관 카드를 흐리게
 };
@@ -225,7 +225,7 @@ function saveSettings(partial) {
     'notifyReminder',
     'showRatings',
     'showVerdict',
-    'showStaffScore',
+    'showScore',
     'showHeart',
     'dimSkip',
   ]) {
@@ -233,6 +233,22 @@ function saveSettings(partial) {
   }
   writeJson(SETTINGS_PATH, next);
   return next;
+}
+
+// 더 이상 쓰지 않는 설정 키를 저장본에서 지운다 (서버 시작 시 1회, 멱등).
+// 읽을 때 무시되긴 하지만 남겨두면 settings.json 만 보고 현행 옵션을 오해하게 된다.
+const RETIRED_SETTINGS_KEYS = [
+  'showStaffScore', // ★강사구성 원점수 표식 → showScore(종합점수)로 대체
+];
+function pruneSettings() {
+  const s = readJson(SETTINGS_PATH, null);
+  if (!s) return { removed: [] };
+  const removed = RETIRED_SETTINGS_KEYS.filter((k) => k in s);
+  if (removed.length) {
+    for (const k of removed) delete s[k];
+    writeJson(SETTINGS_PATH, s);
+  }
+  return { removed };
 }
 
 // ---- state (프로그램 스냅샷) ----
@@ -395,6 +411,7 @@ module.exports = {
   saveInstitution,
   getSettings,
   saveSettings,
+  pruneSettings,
   describeStorage,
   getState,
   saveState,
