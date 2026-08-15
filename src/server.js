@@ -392,13 +392,13 @@ function institutionsSection(s) {
   const summaryOf = (r) => {
     if (!r.evaluated) return '<span class="muted small">미평가</span>';
     const bits = [];
-    if (VERDICT_DOT[r.verdict]) {
+    if (VERDICT_LABEL[r.verdict]) {
       bits.push(
-        `<span class="vchip v-${r.verdict}">${VERDICT_DOT[r.verdict]} ${VERDICT_LABEL[r.verdict]}</span>`
+        `<span class="vchip v-${r.verdict}">${markDot(r.verdict)}${VERDICT_LABEL[r.verdict]}</span>`
       );
     }
-    if (r.staffScore != null) bits.push(`<span class="isc">★${r.staffScore}</span>`);
-    if (r.heart) bits.push('<span class="ihe">❤️</span>');
+    if (r.staffScore != null) bits.push(markStar(r.staffScore));
+    if (r.heart) bits.push(markHeart());
     if (r.score != null) {
       bits.push(
         `<span class="sbadge s-${r.verdict || 'none'}" title="종합점수 ${r.score}/100">${r.score}</span>`
@@ -478,7 +478,7 @@ function institutionsSection(s) {
           ])}</label>
           <label class="ifl ifl-heart">
             <input type="checkbox" class="ifield" data-k="heart" ${r.heart ? 'checked' : ''}>
-            <span>❤️ 정성 호감</span>
+            <span>${markHeart()} 정성 호감</span>
           </label>
         </div>
         <div class="iskip muted small"${r.staffScore === 0 ? '' : ' hidden'}>
@@ -517,10 +517,10 @@ function institutionsSection(s) {
         <div class="muted small" style="margin-bottom:6px;">표시할 표식 고르기</div>
         <div class="opts">
           ${[
-            ['showVerdict', '🟢 종합판정 색점'],
-            ['showStaffScore', '★ 강사구성'],
-            ['showHeart', '❤️ 하트'],
-            ['dimSkip', '🔴 거르기 기관 흐리게'],
+            ['showVerdict', `${markDot('redo')} 종합판정 색점`],
+            ['showStaffScore', `<span class="imk-star">${icon('star-filled', 11)}</span> 강사구성`],
+            ['showHeart', `${markHeart()} 하트`],
+            ['dimSkip', `${markDot('skip')} 거르기 기관 흐리게`],
           ]
             .map(
               ([key, label]) => `<label class="opt ${s[key] ? 'on' : ''}">
@@ -891,16 +891,21 @@ app.get('/settings', requireAuth, (req, res) => {
           row.dataset.score = r.score == null ? -1 : r.score;
           row.dataset.staff = r.staffScore == null ? -1 : r.staffScore;
           row.classList.toggle('irow-todo', !r.evaluated);
-          var DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
+          // 표식 조각은 서버와 같은 SVG 를 그대로 내려받아 쓴다 (이모지 금지)
+          var MK = ${JSON.stringify({
+            dot: { redo: markDot('redo'), ok: markDot('ok'), skip: markDot('skip') },
+            star: icon('star-filled', 11),
+            heart: markHeart(),
+          })};
           var LBL = { redo: '재신청', ok: '보통', skip: '거르기' };
           var html = '';
           if (!r.evaluated) {
             html = '<span class="muted small">미평가</span>';
           } else {
             var bits = [];
-            if (DOT[r.verdict]) bits.push('<span class="vchip v-' + r.verdict + '">' + DOT[r.verdict] + ' ' + LBL[r.verdict] + '</span>');
-            if (r.staffScore !== null && r.staffScore !== undefined) bits.push('<span class="isc">★' + r.staffScore + '</span>');
-            if (r.heart) bits.push('<span class="ihe">❤️</span>');
+            if (LBL[r.verdict]) bits.push('<span class="vchip v-' + r.verdict + '">' + MK.dot[r.verdict] + LBL[r.verdict] + '</span>');
+            if (r.staffScore !== null && r.staffScore !== undefined) bits.push('<span class="imk-star" title="강사구성 ' + r.staffScore + '점">' + MK.star + '<b>' + r.staffScore + '</b></span>');
+            if (r.heart) bits.push(MK.heart);
             if (r.score !== null && r.score !== undefined) bits.push('<span class="sbadge s-' + (r.verdict || 'none') + '" title="종합점수 ' + r.score + '/100">' + r.score + '</span>');
             html = bits.join(' ');
           }
@@ -1239,7 +1244,6 @@ function lookupInstitution(institution) {
   );
 }
 
-const VERDICT_DOT = { redo: '🟢', ok: '🟡', skip: '🔴' };
 const VERDICT_LABEL = { redo: '재신청', ok: '보통', skip: '거르기' };
 const PAY_LABEL = { good: '강사료 좋음', avg: '강사료 평균', poor: '강사료 아쉬움' };
 const TRAINING_LABEL = {
@@ -1263,11 +1267,12 @@ function ratingOf(institution, s) {
   const r = lookupInstitution(institution);
   if (!r || !r.evaluated) return off;
   const dim = !!(s.dimSkip && r.verdict === 'skip');
+  // 표식 순서: 색점 → 별점 → 하트 (CSS gap 4px 로 사이 간격 정돈)
   const bits = [];
-  if (s.showVerdict && VERDICT_DOT[r.verdict]) bits.push(VERDICT_DOT[r.verdict]);
-  if (s.showStaffScore && r.staffScore != null) bits.push('★' + r.staffScore);
-  if (s.showHeart && r.heart) bits.push('❤️');
-  if (!bits.length) return { mark: '', dim };
+  if (s.showVerdict) bits.push(markDot(r.verdict));
+  if (s.showStaffScore && r.staffScore != null) bits.push(markStar(r.staffScore));
+  if (s.showHeart && r.heart) bits.push(markHeart());
+  if (!bits.filter(Boolean).length) return { mark: '', dim };
   const tip = [
     VERDICT_LABEL[r.verdict],
     r.staffScore != null ? '강사구성 ' + r.staffScore : '',
@@ -1280,6 +1285,7 @@ function ratingOf(institution, s) {
     .filter(Boolean)
     .join(' · ');
   const mark = `<span class="imark" title="${escapeHtml(tip)}">${bits.join('')}</span>`;
+  // (개별 표식에도 title 이 붙어 있어 마우스를 올린 표식의 설명이 우선 뜬다)
   return { mark, dim };
 }
 
@@ -1300,13 +1306,44 @@ const ICON_PATHS = {
     '<path d="M4 11h16"/><path d="M8 15h2v2h-2z"/>',
   // ti-chevron-right
   'chevron-right': '<path d="M9 6l6 6l-6 6"/>',
+  // ti-star-filled — 기관 평가 '강사구성' 표식 (이모지 ★ 대체)
+  'star-filled':
+    '<path d="M8.243 7.34l-6.38 .925l-.113 .023a1 1 0 0 0 -.44 1.684l4.622 4.499l-1.09 6.355' +
+    'l-.013 .11a1 1 0 0 0 1.464 .944l5.706 -3l5.693 3l.1 .046a1 1 0 0 0 1.352 -1.1l-1.091 -6.355' +
+    'l4.624 -4.5l.078 -.085a1 1 0 0 0 -.633 -1.62l-6.38 -.926l-2.852 -5.78a1 1 0 0 0 -1.794 0' +
+    'l-2.853 5.78z"/>',
+  // ti-heart-filled — 기관 평가 '정성 호감' 표식 (이모지 ❤️ 대체)
+  'heart-filled':
+    '<path d="M6.979 3.074a6 6 0 0 1 4.988 1.425l.037 .033l.034 -.03a6 6 0 0 1 4.733 -1.44l.246 .036' +
+    'a6 6 0 0 1 3.364 10.008l-.18 .185l-.048 .041l-7.45 7.379a1 1 0 0 1 -1.313 .082l-.094 -.082' +
+    'l-7.493 -7.422a6 6 0 0 1 3.176 -10.215z"/>',
 };
-function icon(name) {
+// 채움(fill) 아이콘 — 선(stroke) 아이콘과 그리는 방식이 다르다
+const FILLED_ICONS = new Set(['star-filled', 'heart-filled']);
+function icon(name, size = 13) {
   const paths = ICON_PATHS[name];
   if (!paths) return ''; // 폴백: 아이콘 없으면 텍스트만
-  return `<svg class="ti ti-${name}" width="13" height="13" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+  const style = FILLED_ICONS.has(name)
+    ? 'fill="currentColor" stroke="none"'
+    : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  return `<svg class="ti ti-${name}" width="${size}" height="${size}" viewBox="0 0 24 24" ${style}
     aria-hidden="true" focusable="false">${paths}</svg>`;
+}
+
+// ---- 기관 평가 표식 조각 (플래너·최근 감지·설정 화면 공통) ----
+// 이모지는 OS/브라우저마다 뭉개져 보여서 전부 인라인 SVG + 색점으로 통일한다.
+function markDot(verdict) {
+  if (!VERDICT_LABEL[verdict]) return '';
+  return `<span class="imk-dot imk-${verdict}" title="${VERDICT_LABEL[verdict]}"></span>`;
+}
+function markStar(score) {
+  return `<span class="imk-star" title="강사구성 ${escapeHtml(String(score))}점">${icon(
+    'star-filled',
+    11
+  )}<b>${escapeHtml(String(score))}</b></span>`;
+}
+function markHeart() {
+  return `<span class="imk-heart" title="정성 호감">${icon('heart-filled', 12)}</span>`;
 }
 
 // ---- 정원 계산 (실질 잔여 기준) ----
@@ -1479,6 +1516,37 @@ function cardHead(x, s) {
     </div>`;
 }
 
+// ---- 표식 범례 (플래너 상단) ----
+// 표식만 보고는 뜻을 알기 어려우니 접이식 한 줄로 설명을 붙인다.
+// 기본 접힘이고, 표식이 켜져 있을 때(showRatings ON)만 나온다.
+function legendHtml(s) {
+  if (!s || !s.showRatings) return '';
+  const items = [];
+  if (s.showVerdict) {
+    items.push(
+      `<span class="lg">${markDot('redo')}재신청</span>`,
+      `<span class="lg">${markDot('ok')}보통</span>`,
+      `<span class="lg">${markDot('skip')}거르기</span>`,
+      '<span class="lg-note">(종합판정)</span>'
+    );
+  }
+  if (s.showStaffScore) {
+    items.push(
+      `<span class="lg"><span class="imk-star">${icon('star-filled', 11)}</span>강사구성</span>`
+    );
+  }
+  if (s.showHeart) {
+    items.push(
+      `<span class="lg"><span class="imk-heart">${icon('heart-filled', 12)}</span>정성 호감</span>`
+    );
+  }
+  if (!items.length) return '';
+  return `<details class="plan-legend">
+      <summary>표식 설명</summary>
+      <div class="legend-body">${items.join('<span class="lg-sep">·</span>')}</div>
+    </details>`;
+}
+
 // ---- 신청 플래너 → { html, openReady } (openReady: 오픈일시 확인된 예정 프로그램 수) ----
 function renderPlanner() {
   const s = storage.getSettings();
@@ -1590,6 +1658,7 @@ function renderPlanner() {
   const html = `
     <div class="card planner">
       <div class="card-title">🗂️ 신청 플래너</div>
+      ${legendHtml(s)}
       ${liveSection}
       <div class="plan-group">
         <div class="plan-group-title">🕐 신청 오픈 예정 <span class="muted small">${open.length}</span></div>
@@ -1634,6 +1703,11 @@ function pageShell(title, body) {
     --tc-general-bg:#E6F1FB; --tc-general-fg:#0C447C;
     --tc-migrant-bg:#EEEDFE; --tc-migrant-fg:#26215C;
     --tc-welfare-bg:#E1F5EE; --tc-welfare-fg:#085041;
+    /* 기관 평가 표식 — 색점(원+연한 테두리) · 별점 · 하트 */
+    --mk-redo:#1D9E75; --mk-redo-ring:#E1F5EE;
+    --mk-ok:#EF9F27;   --mk-ok-ring:#FBEED5;
+    --mk-skip:#E24B4A; --mk-skip-ring:#FCE4E3;
+    --mk-star:#B7791F; --mk-heart:#E0567B;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -1650,6 +1724,9 @@ function pageShell(title, body) {
       --rail-full-bg:#4A1A1A; --rail-full-fg:#F5C4C4;
       --rail-dday-bg:#1B2F55; --rail-dday-fg:#C3D6F7;
       --gauge-pend:#D18A1A;
+      /* 표식: 점 색은 그대로 두고 테두리만 어둡게 (밝은 링은 다크에서 튄다) */
+      --mk-redo-ring:#123A30; --mk-ok-ring:#43350F; --mk-skip-ring:#45201F;
+      --mk-star:#D9A64A; --mk-heart:#EF7C9C;
     }
   }
   * { box-sizing: border-box; }
@@ -1766,9 +1843,34 @@ function pageShell(title, body) {
   .g3-pend { background:var(--gauge-pend); }
   .g3-full .g3-app, .g3-full .g3-pend { background:var(--gauge-full); }
   .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
-  /* 기관 평가 표식 (업체명 앞) */
-  .imark { flex:none; font-size:11.5px; font-weight:700; letter-spacing:-0.01em;
-    display:inline-flex; align-items:center; gap:1px; cursor:help; }
+  /* 기관 평가 표식 (업체명 앞) — 색점 → 별점 → 하트, 사이 4px */
+  .imark { flex:none; display:inline-flex; align-items:center; gap:4px; cursor:help; }
+  /* 종합판정 색점: 7px 원 + 같은 계열 연한색 테두리 효과 */
+  .imk-dot { flex:none; width:7px; height:7px; border-radius:50%; margin:0 1px; }
+  .imk-redo { background:var(--mk-redo); box-shadow:0 0 0 2px var(--mk-redo-ring); }
+  .imk-ok   { background:var(--mk-ok);   box-shadow:0 0 0 2px var(--mk-ok-ring); }
+  .imk-skip { background:var(--mk-skip); box-shadow:0 0 0 2px var(--mk-skip-ring); }
+  /* 별점 = 아이콘 + 숫자 한 덩어리 · 하트 = 아이콘만 */
+  .imk-star { flex:none; display:inline-flex; align-items:center; gap:2px; color:var(--mk-star);
+    line-height:1; }
+  .imk-star b { font-size:11.5px; font-weight:600; letter-spacing:-0.01em; }
+  .imk-heart { flex:none; display:inline-flex; align-items:center; color:var(--mk-heart);
+    line-height:1; }
+  .imk-star svg, .imk-heart svg, .imk-dot { display:block; }
+  /* 표식 범례 (플래너 상단, 기본 접힘) */
+  .plan-legend { margin:-2px 0 10px; }
+  .plan-legend > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center;
+    gap:3px; font-size:11.5px; font-weight:600; color:var(--text-muted); }
+  .plan-legend > summary::-webkit-details-marker { display:none; }
+  .plan-legend > summary::after { content:'▾'; font-size:9px; }
+  .plan-legend[open] > summary::after { content:'▴'; }
+  .plan-legend > summary:hover { color:var(--text-secondary); }
+  .legend-body { display:flex; flex-wrap:wrap; align-items:center; gap:3px 9px; margin-top:6px;
+    padding:7px 11px; background:var(--surface-1); border-radius:10px;
+    font-size:11.5px; color:var(--text-secondary); }
+  .lg { display:inline-flex; align-items:center; gap:4px; }
+  .lg-note { color:var(--text-muted); }
+  .lg-sep { color:var(--text-muted); opacity:.5; }
   /* 기관 평가 섹션 */
   .ifilters { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0 10px; }
   .fchip { background:var(--surface-1); color:var(--text-secondary); border:1px solid var(--line);
@@ -1783,12 +1885,12 @@ function pageShell(title, body) {
   .irow[open] > summary::before { content:'▾'; }
   .irow-todo > summary { opacity:.55; }
   .iname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
-  .isum { flex:none; display:flex; align-items:center; gap:6px; }
-  .vchip { font-size:11px; font-weight:700; padding:1px 8px; border-radius:999px; white-space:nowrap; }
+  .isum { flex:none; display:flex; align-items:center; gap:7px; }
+  .vchip { font-size:11px; font-weight:700; padding:1px 8px; border-radius:999px; white-space:nowrap;
+    display:inline-flex; align-items:center; gap:6px; }
   .v-redo { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
   .v-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
   .v-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
-  .isc { font-size:12px; font-weight:800; color:var(--text-secondary); }
   /* 점수에 반영되지 않는 참고 항목 표시 */
   .noscore { font-size:10px; font-weight:700; color:var(--text-muted); background:var(--surface-1);
     border-radius:6px; padding:1px 6px; margin-left:2px; }
@@ -1853,6 +1955,8 @@ function pageShell(title, body) {
     padding:9px 13px; border-radius:11px; cursor:pointer; font-size:14px; user-select:none; }
   .opt.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); font-weight:600; }
   .opt input { accent-color: var(--green); width:16px; height:16px; }
+  /* 표식 아이콘이 섞인 라벨(표식 고르기·정성 호감)도 가운데 정렬 */
+  .submarks .opt > span, .ifl-heart > span { display:inline-flex; align-items:center; gap:5px; }
   .interval { display:flex; align-items:center; gap:10px; }
   .interval input { width:90px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; font-size:15px; }
   /* 입력창도 표면 토큰을 따라가야 다크에서 흰 배경 + 흰 글자가 되지 않는다 */
