@@ -18,29 +18,46 @@ const INSTITUTION_SEED = require('./institutions.seed.json');
 
 const DEFAULT_INSTITUTION = {
   name: '',
-  staffScore: null, // 강사구성: 0 | 3 | 4 | 4.5 | 5 | null
-  pay: null, // 강사료: good | avg | poor | null
+  staffScore: null, // 강사구성 단계 점수: 50 | 48 | 45 | 40 | 30 | 0 | null
+  pay: null, // 강사료: over(초과) | avg(7.5만) | under(이하) | null
+  ops: null, // 운영 편의: easy | normal | hard | null
+  material: null, // 교구: yes | no | null
   training: null, // 연수(참고, 점수 미반영): live | video | live_then_video | null
   //         (구 표기 online/offline 도 그대로 보존한다)
-  snack: null, // 간식: yes | no | unknown | null
-  heart: false, // 정성 호감
-  verdict: null, // 종합: redo | ok | skip | null
+  snack: null, // 간식: twice(2번+) | once(1번) | no(안 줌) | null
+  heart: false, // 승인 잘해줌 (참고, 점수 미반영)
+  verdict: null, // 종합: strong(강력추천) | ok(추천) | no(비추천) | null
   approvalNote: '', // 신청 결과 맥락 메모
   memo: '', // 자유 메모
   evaluated: false,
 };
 
+// 강사구성 6단계 — 단계 자체가 곧 배점이다(최대 50).
+// 라벨은 설정 화면 드롭다운과 툴팁에서 함께 쓴다.
+const STAFF_STEPS = [
+  [50, '주+보조+안전 모두 학교'],
+  [48, '주+보조 학교'],
+  [45, '주+보조 학교, 안전만 외부'],
+  [40, '주강사만 학교'],
+  [30, '보조강사만 학교'],
+  [0, '신청 대상 제외'],
+];
+const STAFF_LABEL = Object.fromEntries(STAFF_STEPS);
+
 // 종합점수 가중치 (최대 합계 100점). 기준을 바꾸고 싶으면 이 표만 고치면 된다.
-//  강사구성 42 + 강사료 23 + 종합판정 15 + 하트 12 + 간식 8 = 100
-//  우선순위: 강사구성 > 강사료 > 종합판정 · 하트 > 간식 > 연수(0)
-//  연수는 2026 개편 이후 점수에 반영하지 않는다 — 대시보드에는 '참고' 항목으로만 남는다.
+//  강사구성 50 + 강사료 20 + 운영 편의 10 + 교구 10 + 간식 10 = 100
+//  종합판정·연수·하트는 점수에 반영하지 않는다 — 판정은 사람이 내리는 결론이고,
+//  연수/하트는 참고 항목이라 점수에 섞으면 같은 근거를 두 번 세게 된다.
 const SCORE_WEIGHTS = {
-  staff: 42, // staffScore / 5 × 42
-  pay: { good: 23, avg: 16, poor: 7 },
-  verdict: { redo: 15, ok: 8, skip: 0 },
-  heart: 12,
-  snack: { yes: 8, unknown: 4, no: 2 },
-  training: null, // 점수 미반영 (참고용 항목)
+  staff: Object.fromEntries(STAFF_STEPS.map(([v]) => [v, v])), // 단계 점수 = 배점
+  staffMax: 50,
+  pay: { over: 20, avg: 18, under: 15 },
+  ops: { easy: 10, normal: 9, hard: 8 },
+  material: { yes: 10, no: 8 },
+  snack: { twice: 10, once: 9, no: 8 },
+  verdict: null, // 점수 미반영 (사람이 내리는 결론)
+  heart: null, // 점수 미반영 (참고 항목)
+  training: null, // 점수 미반영 (참고 항목)
 };
 
 // 종합점수 0~100. 아직 안 채운 항목은 0점으로 둔다(비율 환산하면 한두 항목만
@@ -49,26 +66,67 @@ function scoreOf(r) {
   if (!r || !isEvaluated(r)) return null;
   if (r.staffScore === 0) return 0; // 신청 대상 제외 → 무조건 0점
   let sum = 0;
-  if (r.staffScore != null) sum += (r.staffScore / 5) * SCORE_WEIGHTS.staff;
-  if (r.pay && SCORE_WEIGHTS.pay[r.pay] != null) sum += SCORE_WEIGHTS.pay[r.pay];
-  // 연수(training)는 의도적으로 계산하지 않는다 — 참고 항목
-  if (r.snack && SCORE_WEIGHTS.snack[r.snack] != null) sum += SCORE_WEIGHTS.snack[r.snack];
-  if (r.verdict && SCORE_WEIGHTS.verdict[r.verdict] != null) {
-    sum += SCORE_WEIGHTS.verdict[r.verdict];
+  if (r.staffScore != null && SCORE_WEIGHTS.staff[r.staffScore] != null) {
+    sum += SCORE_WEIGHTS.staff[r.staffScore];
   }
-  if (r.heart) sum += SCORE_WEIGHTS.heart;
+  // 연수(training)·하트·종합판정은 의도적으로 계산하지 않는다 — 참고 항목
+  for (const key of ['pay', 'ops', 'material', 'snack']) {
+    const table = SCORE_WEIGHTS[key];
+    if (r[key] && table[r[key]] != null) sum += table[r[key]];
+  }
   return Math.max(0, Math.min(100, Math.round(sum)));
 }
 
 const INST_ENUMS = {
-  staffScore: [0, 3, 4, 4.5, 5],
-  pay: ['good', 'avg', 'poor'],
+  staffScore: STAFF_STEPS.map(([v]) => v),
+  pay: ['over', 'avg', 'under'],
+  ops: ['easy', 'normal', 'hard'],
+  material: ['yes', 'no'],
   // 연수 형태. 앞 3개가 현행 선택지이고, online/offline 은 예전에 저장된 값이라
   // 지우지 않고 계속 허용한다(사용자가 다시 고르기 전까지 값이 사라지지 않게).
   training: ['live', 'video', 'live_then_video', 'online', 'offline'],
-  snack: ['yes', 'no', 'unknown'],
-  verdict: ['redo', 'ok', 'skip'],
+  snack: ['twice', 'once', 'no'],
+  verdict: ['strong', 'ok', 'no'],
 };
+
+// ---- 구(舊) 평가 스키마 → 신(新) 스키마 이관 (읽을 때마다 적용, 멱등) ----
+// 구 값과 신 값이 겹치지 않게 짜여 있어서(예: 구 staffScore 는 0~5, 신 단계는 0·30~50)
+// 몇 번을 다시 돌려도 결과가 같다. 저장본을 못 고치는 상황(볼륨 읽기전용 등)에서도
+// 화면·점수는 항상 새 체계로 보이게 하려고 getInstitutions() 에서도 통과시킨다.
+const LEGACY_STAFF = { 5: 50, 4.5: 45, 4: 40, 3: 30, 0: 0 };
+const LEGACY_PAY = { good: 'over', poor: 'under' }; // avg 는 뜻이 같아 그대로
+const LEGACY_SNACK = { yes: 'once', unknown: null }; // '줌'은 횟수 미상 → 보수적으로 1번
+const LEGACY_VERDICT = { redo: 'strong', skip: 'no' }; // ok 는 뜻이 같아 그대로
+
+// 한 건을 새 스키마로 옮긴다. { rec, changed } 반환 (changed=false 면 이미 최신)
+function migrateInstitutionRecord(row) {
+  const rec = { ...row };
+  let changed = false;
+  // 강사구성: 구 5점 척도(0~5)만 단계 점수로 환산한다. 신 단계(30~50)는 건드리지 않음.
+  if (rec.staffScore != null && rec.staffScore > 0 && rec.staffScore <= 5) {
+    const v = LEGACY_STAFF[rec.staffScore];
+    if (v != null) {
+      rec.staffScore = v;
+      changed = true;
+    }
+  }
+  for (const [key, table] of [
+    ['pay', LEGACY_PAY],
+    ['snack', LEGACY_SNACK],
+    ['verdict', LEGACY_VERDICT],
+  ]) {
+    if (rec[key] != null && Object.prototype.hasOwnProperty.call(table, rec[key])) {
+      rec[key] = table[rec[key]];
+      changed = true;
+    }
+  }
+  // 강사구성 0(신청 대상 제외) → 종합판정 '비추천' 고정
+  if (rec.staffScore === 0 && rec.verdict !== 'no') {
+    rec.verdict = 'no';
+    changed = true;
+  }
+  return { rec, changed };
+}
 
 const DEFAULT_SETTINGS = {
   programType: ['방문형'],
@@ -93,7 +151,7 @@ const DEFAULT_SETTINGS = {
   showVerdict: true, // 종합판정 색점
   showStaffScore: true, // 강사구성 별점
   showHeart: true, // 하트
-  dimSkip: false, // 거르기 기관 카드를 흐리게
+  dimSkip: false, // 비추천 기관 카드를 흐리게
 };
 
 function ensureDir() {
@@ -239,13 +297,15 @@ function getInstitutions() {
     ...(byName[seed.name] || {}),
     name: seed.name,
   }));
+  // 구 스키마 저장본도 항상 새 체계로 보이게 (파일 이관은 migrate 가 따로 한다)
+  for (let i = 0; i < merged.length; i++) merged[i] = migrateInstitutionRecord(merged[i]).rec;
   // 종합점수는 저장하지 않고 읽을 때 계산한다 (가중치를 바꾸면 즉시 반영)
   for (const r of merged) r.score = scoreOf(r);
   // 시드에서 빠진(이름이 바뀐 등) 저장본도 잃지 않고 뒤에 붙인다
   const seedNames = new Set(INSTITUTION_SEED.map((s) => s.name));
   for (const name of Object.keys(byName)) {
     if (!seedNames.has(name)) {
-      const extra = { ...DEFAULT_INSTITUTION, ...byName[name] };
+      const extra = migrateInstitutionRecord({ ...DEFAULT_INSTITUTION, ...byName[name] }).rec;
       extra.score = scoreOf(extra);
       merged.push(extra);
     }
@@ -258,6 +318,8 @@ function isEvaluated(r) {
   return !!(
     r.staffScore != null ||
     r.pay ||
+    r.ops ||
+    r.material ||
     r.training ||
     r.snack ||
     r.heart ||
@@ -274,7 +336,7 @@ function normalizeInstitution(patch) {
     const v = patch.staffScore === '' || patch.staffScore == null ? null : Number(patch.staffScore);
     out.staffScore = INST_ENUMS.staffScore.includes(v) ? v : null;
   }
-  for (const key of ['pay', 'training', 'snack', 'verdict']) {
+  for (const key of ['pay', 'ops', 'material', 'training', 'snack', 'verdict']) {
     if (key in patch) {
       const v = patch[key] == null ? '' : String(patch[key]);
       out[key] = INST_ENUMS[key].includes(v) ? v : null;
@@ -293,8 +355,8 @@ function saveInstitution(name, patch) {
   if (idx < 0) throw new Error('알 수 없는 기관: ' + name);
 
   const next = { ...list[idx], ...normalizeInstitution(patch || {}) };
-  // 강사구성 0 = 신청 대상 제외 → 종합판정을 '거르기'로 고정
-  if (next.staffScore === 0) next.verdict = 'skip';
+  // 강사구성 0 = 신청 대상 제외 → 종합판정을 '비추천'으로 고정
+  if (next.staffScore === 0) next.verdict = 'no';
   next.evaluated = isEvaluated(next);
 
   list[idx] = next;
@@ -303,13 +365,32 @@ function saveInstitution(name, patch) {
   return next;
 }
 
+// 저장본(institutions.json)을 새 스키마로 실제로 고쳐 쓴다 (서버 시작 시 1회, 멱등).
+// 파일이 없으면(평가를 아직 저장한 적 없음) 아무 것도 하지 않는다 — 시드는 이미 새 체계.
+function migrateInstitutionsFile() {
+  const saved = readJson(INSTITUTIONS_PATH, null);
+  if (!Array.isArray(saved) || !saved.length) return { changed: 0, total: 0 };
+  let changed = 0;
+  const next = saved.map((row) => {
+    const out = migrateInstitutionRecord(row);
+    if (out.changed) changed++;
+    return out.rec;
+  });
+  if (changed) writeJson(INSTITUTIONS_PATH, next.map(({ score, ...rest }) => rest));
+  return { changed, total: saved.length };
+}
+
 module.exports = {
   DATA_DIR,
   DEFAULT_SETTINGS,
   DEFAULT_INSTITUTION,
   INST_ENUMS,
   SCORE_WEIGHTS,
+  STAFF_STEPS,
+  STAFF_LABEL,
   scoreOf,
+  migrateInstitutionRecord,
+  migrateInstitutionsFile,
   getInstitutions,
   saveInstitution,
   getSettings,

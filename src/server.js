@@ -436,17 +436,24 @@ function institutionsSection(s) {
       </summary>
       <div class="iedit">
         <div class="ifields">
-          <label class="ifl">강사구성${sel('staffScore', r.staffScore, [
-            [5, '5'],
-            [4.5, '4.5'],
-            [4, '4'],
-            [3, '3'],
-            [0, '0 (신청 대상 제외)'],
+          <label class="ifl ifl-staff">강사구성${sel(
+            'staffScore',
+            r.staffScore,
+            storage.STAFF_STEPS.map(([v, label]) => [v, `${label} (${v})`])
+          )}</label>
+          <label class="ifl" title="강사료 기준 7.5만원">강사료${sel('pay', r.pay, [
+            ['over', '초과 (20)'],
+            ['avg', '평균 7.5만 (18)'],
+            ['under', '이하 (15)'],
           ])}</label>
-          <label class="ifl">강사료${sel('pay', r.pay, [
-            ['good', '좋음'],
-            ['avg', '평균'],
-            ['poor', '아쉬움'],
+          <label class="ifl" title="산출물 요구·행정 부담 등 운영 편의">운영 편의${sel('ops', r.ops, [
+            ['easy', '편함 (10)'],
+            ['normal', '보통 (9)'],
+            ['hard', '까다로움 (8)'],
+          ])}</label>
+          <label class="ifl" title="교구를 업체가 가져오는지">교구${sel('material', r.material, [
+            ['yes', '있음 (10)'],
+            ['no', '없음 (8)'],
           ])}</label>
           <label class="ifl" title="참고용 항목입니다 — 종합점수에 반영되지 않습니다">
             연수 <span class="noscore">참고·점수 미반영</span>
@@ -467,22 +474,25 @@ function institutionsSection(s) {
             )}
           </label>
           <label class="ifl">간식${sel('snack', r.snack, [
-            ['yes', '줌'],
-            ['no', '안 줌'],
-            ['unknown', '모름'],
+            ['twice', '2번 이상 (10)'],
+            ['once', '1번 (9)'],
+            ['no', '안 줌 (8)'],
           ])}</label>
-          <label class="ifl">종합판정${sel('verdict', r.verdict, [
-            ['redo', '재신청'],
-            ['ok', '보통'],
-            ['skip', '거르기'],
-          ])}</label>
-          <label class="ifl ifl-heart">
+          <label class="ifl" title="사람이 내리는 결론 — 종합점수에 반영되지 않습니다">
+            종합판정 <span class="noscore">점수 미반영</span>
+            ${sel('verdict', r.verdict, [
+              ['strong', '강력추천'],
+              ['ok', '추천'],
+              ['no', '비추천'],
+            ])}
+          </label>
+          <label class="ifl ifl-heart" title="승인을 잘해주는 기관 (참고용 — 종합점수 미반영)">
             <input type="checkbox" class="ifield" data-k="heart" ${r.heart ? 'checked' : ''}>
-            <span>${markHeart()} 정성 호감</span>
+            <span>${markHeart()} 승인 잘해줌</span>
           </label>
         </div>
         <div class="iskip muted small"${r.staffScore === 0 ? '' : ' hidden'}>
-          강사구성 0 — <b>신청 대상 제외</b>로 보고 종합판정을 '거르기'로 고정합니다.
+          강사구성 0 — <b>신청 대상 제외</b>로 보고 종합점수 0점 · 종합판정 '비추천'으로 고정합니다.
         </div>
         <label class="ifl ifl-wide">신청결과 메모
           <input type="text" class="ifield" data-k="approvalNote" maxlength="500"
@@ -517,10 +527,10 @@ function institutionsSection(s) {
         <div class="muted small" style="margin-bottom:6px;">표시할 표식 고르기</div>
         <div class="opts">
           ${[
-            ['showVerdict', `${markDot('redo')} 종합판정 색점`],
+            ['showVerdict', `${markDot('strong')} 종합판정 색점`],
             ['showStaffScore', `<span class="imk-star">${icon('star-filled', 11)}</span> 강사구성`],
-            ['showHeart', `${markHeart()} 하트`],
-            ['dimSkip', `${markDot('skip')} 거르기 기관 흐리게`],
+            ['showHeart', `${markHeart()} 승인 잘해줌`],
+            ['dimSkip', `${markDot('no')} 비추천 기관 흐리게`],
           ]
             .map(
               ([key, label]) => `<label class="opt ${s[key] ? 'on' : ''}">
@@ -536,18 +546,19 @@ function institutionsSection(s) {
         미평가 <b class="itodo">${list.length - done}</b>
       </div>
       <div class="muted small" style="margin-top:4px;">
-        종합점수(100점) = 강사구성 ${storage.SCORE_WEIGHTS.staff} ·
-        강사료 ${storage.SCORE_WEIGHTS.pay.good} ·
-        종합판정 ${storage.SCORE_WEIGHTS.verdict.redo} ·
-        하트 ${storage.SCORE_WEIGHTS.heart} ·
-        간식 ${storage.SCORE_WEIGHTS.snack.yes} · <b>연수 0(미반영)</b>
+        종합점수(100점) = 강사구성 ${storage.SCORE_WEIGHTS.staffMax} ·
+        강사료 ${storage.SCORE_WEIGHTS.pay.over} ·
+        운영 편의 ${storage.SCORE_WEIGHTS.ops.easy} ·
+        교구 ${storage.SCORE_WEIGHTS.material.yes} ·
+        간식 ${storage.SCORE_WEIGHTS.snack.twice} ·
+        <b>종합판정·연수·승인 0(미반영)</b>
         &nbsp;/&nbsp; 강사구성 0은 무조건 0점
       </div>
       <div class="ifilters">
         <button type="button" class="fchip on" data-f="all">전체</button>
         <button type="button" class="fchip" data-f="done">평가완료</button>
         <button type="button" class="fchip" data-f="todo">미평가</button>
-        <button type="button" class="fchip" data-f="redo">재신청만</button>
+        <button type="button" class="fchip" data-f="strong">강력추천만</button>
       </div>
       <div class="ifilters isorts">
         <span class="muted small" style="align-self:center;">정렬</span>
@@ -812,7 +823,7 @@ app.get('/settings', requireAuth, (req, res) => {
               var ok = f === 'all'
                 || (f === 'done' && row.dataset.eval === '1')
                 || (f === 'todo' && row.dataset.eval === '0')
-                || (f === 'redo' && row.dataset.verdict === 'redo');
+                || (f === 'strong' && row.dataset.verdict === 'strong');
               row.hidden = !ok;
             });
           });
@@ -846,14 +857,14 @@ app.get('/settings', requireAuth, (req, res) => {
           });
         });
 
-        // 강사구성 0 → 종합판정 '거르기' 고정 + 안내
+        // 강사구성 0 → 종합판정 '비추천' 고정 + 안내
         box.addEventListener('change', (e) => {
           var f = e.target.closest('.ifield');
           if (!f || f.dataset.k !== 'staffScore') return;
           var row = f.closest('.irow');
           var zero = f.value === '0';
           var verdict = row.querySelector('[data-k="verdict"]');
-          if (zero) { verdict.value = 'skip'; }
+          if (zero) { verdict.value = 'no'; }
           verdict.disabled = zero;
           row.querySelector('.iskip').hidden = !zero;
         });
@@ -893,24 +904,28 @@ app.get('/settings', requireAuth, (req, res) => {
           row.classList.toggle('irow-todo', !r.evaluated);
           // 표식 조각은 서버와 같은 SVG 를 그대로 내려받아 쓴다 (이모지 금지)
           var MK = ${JSON.stringify({
-            dot: { redo: markDot('redo'), ok: markDot('ok'), skip: markDot('skip') },
+            dot: { strong: markDot('strong'), ok: markDot('ok'), no: markDot('no') },
             star: icon('star-filled', 11),
             heart: markHeart(),
           })};
-          var LBL = { redo: '재신청', ok: '보통', skip: '거르기' };
+          var LBL = ${JSON.stringify(VERDICT_LABEL)};
+          var STAFF = ${JSON.stringify(storage.STAFF_LABEL)};
           var html = '';
           if (!r.evaluated) {
             html = '<span class="muted small">미평가</span>';
           } else {
             var bits = [];
             if (LBL[r.verdict]) bits.push('<span class="vchip v-' + r.verdict + '">' + MK.dot[r.verdict] + LBL[r.verdict] + '</span>');
-            if (r.staffScore !== null && r.staffScore !== undefined) bits.push('<span class="imk-star" title="강사구성 ' + r.staffScore + '점">' + MK.star + '<b>' + r.staffScore + '</b></span>');
+            if (r.staffScore !== null && r.staffScore !== undefined) {
+              var st = STAFF[r.staffScore] ? ' (' + STAFF[r.staffScore] + ')' : '';
+              bits.push('<span class="imk-star" title="강사구성 ' + r.staffScore + '점' + st + '">' + MK.star + '<b>' + r.staffScore + '</b></span>');
+            }
             if (r.heart) bits.push(MK.heart);
             if (r.score !== null && r.score !== undefined) bits.push('<span class="sbadge s-' + (r.verdict || 'none') + '" title="종합점수 ' + r.score + '/100">' + r.score + '</span>');
             html = bits.join(' ');
           }
           row.querySelector('.isum').innerHTML = html;
-          // 강사구성 0 저장 시 서버가 판정을 skip 으로 바꾸므로 화면도 맞춘다
+          // 강사구성 0 저장 시 서버가 판정을 '비추천'으로 바꾸므로 화면도 맞춘다
           row.querySelector('[data-k="verdict"]').value = r.verdict || '';
           var rows = box.querySelectorAll('.irow');
           var done = box.querySelectorAll('.irow[data-eval="1"]').length;
@@ -1244,8 +1259,10 @@ function lookupInstitution(institution) {
   );
 }
 
-const VERDICT_LABEL = { redo: '재신청', ok: '보통', skip: '거르기' };
-const PAY_LABEL = { good: '강사료 좋음', avg: '강사료 평균', poor: '강사료 아쉬움' };
+const VERDICT_LABEL = { strong: '강력추천', ok: '추천', no: '비추천' };
+const PAY_LABEL = { over: '강사료 초과', avg: '강사료 평균(7.5만)', under: '강사료 이하' };
+const OPS_LABEL = { easy: '운영 편함', normal: '운영 보통', hard: '운영 까다로움' };
+const MATERIAL_LABEL = { yes: '교구 있음', no: '교구 없음' };
 const TRAINING_LABEL = {
   live: '연수 라이브',
   video: '연수 동영상',
@@ -1254,19 +1271,19 @@ const TRAINING_LABEL = {
   online: '연수 온라인(구)',
   offline: '연수 오프라인(구)',
 };
-const SNACK_LABEL = { yes: '간식 줌', no: '간식 안 줌', unknown: '간식 모름' };
+const SNACK_LABEL = { twice: '간식 2번 이상', once: '간식 1번', no: '간식 안 줌' };
 
 // 업체명 앞 표식 + 카드 흐리게 여부.
 //  · 마스터 스위치(showRatings)가 OFF면 개별 옵션과 무관하게 전부 숨김
 //  · 개별 옵션(showVerdict/showStaffScore/showHeart)으로 고른 표식만 노출
-//  · dimSkip 이 ON이면 '거르기' 기관 카드를 흐리게 (숨기지는 않음)
+//  · dimSkip 이 ON이면 '비추천' 기관 카드를 흐리게 (숨기지는 않음)
 // 미평가·매칭 실패면 표식 없음 → 카드는 아무 영향 없이 그대로 그려진다.
 function ratingOf(institution, s) {
   const off = { mark: '', dim: false };
   if (!s || !s.showRatings) return off;
   const r = lookupInstitution(institution);
   if (!r || !r.evaluated) return off;
-  const dim = !!(s.dimSkip && r.verdict === 'skip');
+  const dim = !!(s.dimSkip && r.verdict === 'no');
   // 표식 순서: 색점 → 별점 → 하트 (CSS gap 4px 로 사이 간격 정돈)
   const bits = [];
   if (s.showVerdict) bits.push(markDot(r.verdict));
@@ -1275,8 +1292,10 @@ function ratingOf(institution, s) {
   if (!bits.filter(Boolean).length) return { mark: '', dim };
   const tip = [
     VERDICT_LABEL[r.verdict],
-    r.staffScore != null ? '강사구성 ' + r.staffScore : '',
+    r.staffScore != null ? '강사구성 ' + staffText(r.staffScore) : '',
     PAY_LABEL[r.pay],
+    OPS_LABEL[r.ops],
+    MATERIAL_LABEL[r.material],
     TRAINING_LABEL[r.training],
     SNACK_LABEL[r.snack],
     (r.approvalNote || '').trim(),
@@ -1336,14 +1355,19 @@ function markDot(verdict) {
   if (!VERDICT_LABEL[verdict]) return '';
   return `<span class="imk-dot imk-${verdict}" title="${VERDICT_LABEL[verdict]}"></span>`;
 }
+// 강사구성 점수 → "45점 (주+보조 학교, 안전만 외부)" 형태의 설명
+function staffText(score) {
+  const label = storage.STAFF_LABEL[score];
+  return `${score}점${label ? ` (${label})` : ''}`;
+}
 function markStar(score) {
-  return `<span class="imk-star" title="강사구성 ${escapeHtml(String(score))}점">${icon(
+  return `<span class="imk-star" title="강사구성 ${escapeHtml(staffText(score))}">${icon(
     'star-filled',
     11
   )}<b>${escapeHtml(String(score))}</b></span>`;
 }
 function markHeart() {
-  return `<span class="imk-heart" title="정성 호감">${icon('heart-filled', 12)}</span>`;
+  return `<span class="imk-heart" title="승인 잘해줌">${icon('heart-filled', 12)}</span>`;
 }
 
 // ---- 정원 계산 (실질 잔여 기준) ----
@@ -1524,9 +1548,9 @@ function legendHtml(s) {
   const items = [];
   if (s.showVerdict) {
     items.push(
-      `<span class="lg">${markDot('redo')}재신청</span>`,
-      `<span class="lg">${markDot('ok')}보통</span>`,
-      `<span class="lg">${markDot('skip')}거르기</span>`,
+      `<span class="lg">${markDot('strong')}강력추천</span>`,
+      `<span class="lg">${markDot('ok')}추천</span>`,
+      `<span class="lg">${markDot('no')}비추천</span>`,
       '<span class="lg-note">(종합판정)</span>'
     );
   }
@@ -1537,7 +1561,7 @@ function legendHtml(s) {
   }
   if (s.showHeart) {
     items.push(
-      `<span class="lg"><span class="imk-heart">${icon('heart-filled', 12)}</span>정성 호감</span>`
+      `<span class="lg"><span class="imk-heart">${icon('heart-filled', 12)}</span>승인 잘해줌</span>`
     );
   }
   if (!items.length) return '';
@@ -1704,9 +1728,9 @@ function pageShell(title, body) {
     --tc-migrant-bg:#EEEDFE; --tc-migrant-fg:#26215C;
     --tc-welfare-bg:#E1F5EE; --tc-welfare-fg:#085041;
     /* 기관 평가 표식 — 색점(원+연한 테두리) · 별점 · 하트 */
-    --mk-redo:#1D9E75; --mk-redo-ring:#E1F5EE;
+    --mk-strong:#1D9E75; --mk-strong-ring:#E1F5EE;
     --mk-ok:#EF9F27;   --mk-ok-ring:#FBEED5;
-    --mk-skip:#E24B4A; --mk-skip-ring:#FCE4E3;
+    --mk-no:#E24B4A; --mk-no-ring:#FCE4E3;
     --mk-star:#B7791F; --mk-heart:#E0567B;
   }
   @media (prefers-color-scheme: dark) {
@@ -1725,7 +1749,7 @@ function pageShell(title, body) {
       --rail-dday-bg:#1B2F55; --rail-dday-fg:#C3D6F7;
       --gauge-pend:#D18A1A;
       /* 표식: 점 색은 그대로 두고 테두리만 어둡게 (밝은 링은 다크에서 튄다) */
-      --mk-redo-ring:#123A30; --mk-ok-ring:#43350F; --mk-skip-ring:#45201F;
+      --mk-strong-ring:#123A30; --mk-ok-ring:#43350F; --mk-no-ring:#45201F;
       --mk-star:#D9A64A; --mk-heart:#EF7C9C;
     }
   }
@@ -1847,9 +1871,9 @@ function pageShell(title, body) {
   .imark { flex:none; display:inline-flex; align-items:center; gap:4px; cursor:help; }
   /* 종합판정 색점: 7px 원 + 같은 계열 연한색 테두리 효과 */
   .imk-dot { flex:none; width:7px; height:7px; border-radius:50%; margin:0 1px; }
-  .imk-redo { background:var(--mk-redo); box-shadow:0 0 0 2px var(--mk-redo-ring); }
+  .imk-strong { background:var(--mk-strong); box-shadow:0 0 0 2px var(--mk-strong-ring); }
   .imk-ok   { background:var(--mk-ok);   box-shadow:0 0 0 2px var(--mk-ok-ring); }
-  .imk-skip { background:var(--mk-skip); box-shadow:0 0 0 2px var(--mk-skip-ring); }
+  .imk-no { background:var(--mk-no); box-shadow:0 0 0 2px var(--mk-no-ring); }
   /* 별점 = 아이콘 + 숫자 한 덩어리 · 하트 = 아이콘만 */
   .imk-star { flex:none; display:inline-flex; align-items:center; gap:2px; color:var(--mk-star);
     line-height:1; }
@@ -1888,22 +1912,22 @@ function pageShell(title, body) {
   .isum { flex:none; display:flex; align-items:center; gap:7px; }
   .vchip { font-size:11px; font-weight:700; padding:1px 8px; border-radius:999px; white-space:nowrap;
     display:inline-flex; align-items:center; gap:6px; }
-  .v-redo { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
+  .v-strong { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
   .v-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
-  .v-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  .v-no { background:var(--rail-full-bg); color:var(--rail-full-fg); }
   /* 점수에 반영되지 않는 참고 항목 표시 */
   .noscore { font-size:10px; font-weight:700; color:var(--text-muted); background:var(--surface-1);
     border-radius:6px; padding:1px 6px; margin-left:2px; }
   /* 종합점수 배지 — 판정 색을 따라간다 */
   .sbadge { font-size:11.5px; font-weight:800; padding:2px 8px; border-radius:8px;
     min-width:32px; text-align:center; background:var(--surface-1); color:var(--text-secondary); }
-  .s-redo { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
+  .s-strong { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
   .s-ok { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
-  .s-skip { background:var(--rail-full-bg); color:var(--rail-full-fg); }
+  .s-no { background:var(--rail-full-bg); color:var(--rail-full-fg); }
   /* 개별 표식 선택 — 마스터가 OFF면 흐리게(끄지는 않음, 미리 골라둘 수 있게) */
   .submarks { margin-top:12px; }
   .submarks-off { opacity:.45; }
-  /* 거르기 기관 카드 흐리게 (dimSkip) */
+  /* 비추천 기관 카드 흐리게 (dimSkip) */
   .planrow-skip { opacity:.6; }
   .iedit { padding:4px 2px 14px; }
   .ifields { display:flex; flex-wrap:wrap; gap:10px 14px; }

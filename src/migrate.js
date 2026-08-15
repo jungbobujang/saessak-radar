@@ -1,7 +1,8 @@
 'use strict';
 
 // ============================================================================
-// 교육대상 분류 개편 마이그레이션 (서버 시작 시 1회 실행, 멱등)
+// 저장 데이터 마이그레이션 (서버 시작 시 1회 실행, 멱등)
+// ①~③ 교육대상 분류 개편 · ④ 기관 평가 배점/판정 개편
 // ----------------------------------------------------------------------------
 // 저장된 JSON(settings/state/details)의 구(舊) 분류 라벨을 새 정식 라벨로 이관한다.
 //   다문화        → 사회적 배려형(이주배경(구 다문화))
@@ -18,7 +19,7 @@ function arrEq(a, b) {
 }
 
 function migrate() {
-  const report = { settings: null, stateChanged: 0, detailsChanged: 0 };
+  const report = { settings: null, stateChanged: 0, detailsChanged: 0, institutionsChanged: 0 };
 
   // 1) 알림 설정의 관심 분류(targets) 이관
   try {
@@ -77,15 +78,22 @@ function migrate() {
     console.error('[migrate] details 이관 실패:', e.message);
   }
 
+  // 4) 기관 평가(institutions)의 구 배점·판정 라벨 이관
+  //    강사구성 5점척도 → 단계점수(50/48/45/40/30/0) · pay good|poor → over|under
+  //    snack yes|unknown → once|null · verdict redo|skip → strong|no
+  try {
+    const r = storage.migrateInstitutionsFile();
+    if (r.changed) report.institutionsChanged = r.changed;
+  } catch (e) {
+    console.error('[migrate] institutions 이관 실패:', e.message);
+  }
+
   const touched =
-    report.settings || report.stateChanged || report.detailsChanged;
+    report.settings || report.stateChanged || report.detailsChanged || report.institutionsChanged;
   if (touched) {
-    console.log(
-      '[migrate] 분류 개편 이관 완료:',
-      JSON.stringify(report, null, 0)
-    );
+    console.log('[migrate] 저장 데이터 이관 완료:', JSON.stringify(report, null, 0));
   } else {
-    console.log('[migrate] 분류 개편 이관 대상 없음(이미 최신)');
+    console.log('[migrate] 이관 대상 없음(이미 최신)');
   }
   return report;
 }
