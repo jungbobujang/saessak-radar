@@ -10,6 +10,7 @@ const LOG_PATH = path.join(DATA_DIR, 'log.json');
 const DETAILS_PATH = path.join(DATA_DIR, 'details.json'); // 프로그램 상세 캐시
 const META_PATH = path.join(DATA_DIR, 'meta.json'); // 마지막 전체 갱신일 등
 const REMINDERS_PATH = path.join(DATA_DIR, 'reminders.json'); // 오픈 리마인더 발송 이력
+const HEARTBEAT_PATH = path.join(DATA_DIR, 'heartbeat.json'); // 감시 루프 하트비트(재시작해도 유지)
 const INSTITUTIONS_PATH = path.join(DATA_DIR, 'institutions.json'); // 기관 평가(사용자 입력)
 
 // 기관 목록 시드. 레포에 포함되고, 사용자 평가만 DATA_DIR 에 따로 저장한다.
@@ -289,6 +290,27 @@ function saveMeta(meta) {
   writeJson(META_PATH, meta);
 }
 
+// ---- 하트비트 (heartbeat.json: 감시 루프가 살아 있다는 증거) ----
+//
+// meta.json 에 얹지 않고 파일을 따로 둔다. watcher 는 한 사이클 안에서
+// getMeta() → (await fetchDetails) → saveMeta() 를 하는데, 그 await 중에
+// 하트비트가 meta 를 갱신하면 뒤이은 saveMeta 가 낡은 객체로 덮어써 지워 버린다.
+//
+// 기록 항목:
+//  · lastStartAt/lastReason : 사이클이 "시작" 한 시각 (실행 중 판정용)
+//  · lastFinishAt/lastOk    : 사이클이 "끝난" 시각 — 상태바의 '마지막 확인'은 이것이다.
+//                             시작 시각을 쓰면 멈춘 사이클이 '방금 확인'으로 보인다.
+//  · lastError/lastMs       : 마지막 결과 진단용
+//  · restarts               : 워치독이 루프를 되살린 누적 횟수
+function getHeartbeat() {
+  return readJson(HEARTBEAT_PATH, {});
+}
+function saveHeartbeat(patch) {
+  const next = { ...getHeartbeat(), ...patch };
+  writeJson(HEARTBEAT_PATH, next);
+  return next;
+}
+
 // ---- 오픈 리마인더 발송 이력 (reminders.json) ----
 // 키: `${id}:${kind}` (kind: 'pre_day' | 'pre_10min') → { at, applyStartAt }
 function getReminders() {
@@ -421,6 +443,8 @@ module.exports = {
   saveDetails,
   getMeta,
   saveMeta,
+  getHeartbeat,
+  saveHeartbeat,
   getReminders,
   saveReminders,
 };

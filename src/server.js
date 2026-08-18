@@ -42,12 +42,15 @@ const {
   checkReminders,
   runtime,
   sendTestAlert,
+  sendTelegram,
   fmtKstDateTime,
   ddayKst,
 } = require('./watcher');
+const { withTimeout } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const bootMs = Date.now(); // 워치독이 부팅 직후 헛발질하지 않도록 기준점으로 쓴다
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -138,15 +141,73 @@ function requireAuth(req, res, next) {
   return res.redirect('/auth?next=' + encodeURIComponent(req.originalUrl || '/settings'));
 }
 
-// ---- 정기 수집 스케줄러 (자기예약 방식 + 단일 실행 락) ----
+// ---- 정기 수집 스케줄러 (자기예약 방식 + 단일 실행 락 + 워치독) ----
 // setInterval/cron 처럼 "고정 주기 발화"는 이전 수집이 안 끝났을 때 겹쳐서 chromium 을
 // 다중 launch → spawn EAGAIN 을 유발한다. 그래서 ① isCollecting 락으로 중복 실행을 막고,
 // ② 수집이 "끝난 뒤"에야 다음 주기를 setTimeout 으로 예약해 겹침을 원천 차단한다.
+//
+// 이 방식의 급소는 "끝난 뒤"다. 한 사이클이 영영 안 끝나면 다음 주기를 예약하는 줄에
+// 도달하지 못해 감시가 통째로 죽는다 (2026-08-18 실제 사고: 사이트 응답이 안 와
+// page.evaluate 가 매달림 → 2시간 정지). 그래서 세 겹으로 막는다.
+//   ① 사이클 자체에 상한(CYCLE_TIMEOUT_MS) — 끝나지 않는 사이클을 강제로 끝낸다
+//   ② 예약은 finally 에서 — 사이클이 어떻게 끝나든 다음 주기는 반드시 잡힌다
+//   ③ 워치독 — 그래도 활동이 끊기면(프로세스 정지·타이머 유실) 스스로 되살린다
+// 기본값이 운영값이다. 환경변수는 검증·비상 조정용 (분 단위).
+const envMin = (name, def) => {
+  const v = parseFloat(process.env[name]);
+  return (Number.isFinite(v) && v > 0 ? v : def) * 60000;
+};
+// 사이클 상한은 스크래퍼가 스스로 끊는 시간(최악 약 6.3분: launch/goto/evaluate 상한의 합)
+// 보다 커야 한다. 더 짧으면 스크래퍼가 browser.close() 로 정리하기 전에 락이 풀려
+// 다음 사이클의 크로뮴과 겹친다(예전 spawn EAGAIN 의 원인). 여기는 최후의 그물이다.
+const CYCLE_TIMEOUT_MS = envMin('CYCLE_TIMEOUT_MIN', 7);     // 한 사이클 상한 (scrape+상세 합계)
+const WATCHDOG_TICK_MS = envMin('WATCHDOG_TICK_MIN', 1);     // 워치독 점검 주기
+const WATCHDOG_STALL_MS = envMin('WATCHDOG_STALL_MIN', 30);  // 이만큼 활동이 없으면 루프를 재시작
+
 let currentInterval = null;  // 대시보드/요약 노출용(현재 적용 간격)
 let isCollecting = false;    // 단일 실행 락 — 수집(scrape+fetchDetails) 1건만 진행
 let nextTimer = null;        // 다음 주기 예약 타이머 핸들
+let stallAlertedMs = 0;      // 같은 정지 구간에서 텔레그램 도배 방지
 
-// 모든 수집 진입점(정기·시작·수동)은 이 함수를 통과한다 → 락이 전역으로 걸린다.
+// 하트비트 — 메모리 사본. 파일(heartbeat.json)과 함께 간다.
+// 재배포·재시작해도 '마지막 확인'이 '확인 전'으로 리셋되지 않게 파일에서 되읽는다.
+const heartbeat = {
+  lastStartAt: null,   // 사이클 시작 시각
+  lastFinishAt: null,  // 사이클 종료 시각 ← 상태바의 '마지막 확인'
+  lastOk: null,
+  lastError: null,
+  lastReason: null,
+  lastMs: null,
+  restarts: 0,         // 워치독이 되살린 누적 횟수
+};
+
+function loadHeartbeat() {
+  try {
+    Object.assign(heartbeat, storage.getHeartbeat() || {});
+  } catch (e) {
+    console.error('[heartbeat] 이전 기록 읽기 실패(무시):', e.message);
+  }
+}
+
+// 하트비트 기록은 절대 감시를 방해하면 안 된다 — 쓰기 실패해도 삼킨다.
+function beat(patch) {
+  Object.assign(heartbeat, patch);
+  try {
+    storage.saveHeartbeat(heartbeat);
+  } catch (e) {
+    console.error('[heartbeat] 기록 실패(무시):', e.message);
+  }
+}
+
+// 마지막 '활동' = 시작이든 종료든 가장 최근에 살아 있었다는 증거
+function lastActivityMs() {
+  const t = [heartbeat.lastStartAt, heartbeat.lastFinishAt]
+    .map((x) => (x ? new Date(x).getTime() : 0))
+    .filter((x) => !isNaN(x));
+  return Math.max(0, ...t);
+}
+
+// 모든 수집 진입점(정기·시작·수동·워치독)은 이 함수를 통과한다 → 락이 전역으로 걸린다.
 // 어떤 경로로 끝나든(성공·에러·타임아웃) finally 에서 락을 반드시 해제 → 다음 주기 정상 진행.
 async function runCollectCycle(reason) {
   if (isCollecting) {
@@ -154,12 +215,29 @@ async function runCollectCycle(reason) {
     return { ok: false, skipped: true, error: '이미 수집이 진행 중입니다.' };
   }
   isCollecting = true;
+  const startedMs = Date.now();
+  beat({ lastStartAt: new Date(startedMs).toISOString(), lastReason: reason });
   try {
     console.log(`[scheduler] 정기 수집 시작 (reason=${reason})`);
-    return await checkOnce({ reason });
+    // 상한을 넘기면 예외. race 는 매달린 쪽을 취소하지 못하지만, 스크래퍼가 자기
+    // 타임아웃으로 browser.close() 까지 해 주므로 크로뮴이 남지 않는다.
+    const r = await withTimeout(checkOnce({ reason }), CYCLE_TIMEOUT_MS, '수집 사이클');
+    beat({
+      lastFinishAt: new Date().toISOString(),
+      lastOk: r && r.ok !== false,
+      lastError: r && r.ok === false ? r.error || '알 수 없음' : null,
+      lastMs: Date.now() - startedMs,
+    });
+    return r;
   } catch (e) {
     // launch 타임아웃 등 예외는 이 주기만 실패로 두고 삼킨다(다음 주기에 자동 재시도).
     console.error(`[scheduler] 수집 예외 (${reason}):`, e.message);
+    beat({
+      lastFinishAt: new Date().toISOString(),
+      lastOk: false,
+      lastError: e.message,
+      lastMs: Date.now() - startedMs,
+    });
     return { ok: false, error: e.message };
   } finally {
     isCollecting = false;
@@ -167,16 +245,112 @@ async function runCollectCycle(reason) {
 }
 
 // 수집이 끝난 뒤 다음 주기를 예약. 매번 설정에서 간격을 다시 읽어 변경을 자동 반영한다.
+// 이 함수 안에서 던지면 체인이 영구히 끊긴다 → 설정 읽기 실패도 기본값으로 넘어간다.
 function scheduleNext() {
-  const s = storage.getSettings();
-  const m = Math.max(1, parseInt(s.intervalMinutes, 10) || 10);
-  currentInterval = m;
+  let m = 10;
+  try {
+    const s = storage.getSettings();
+    m = Math.max(1, parseInt(s.intervalMinutes, 10) || 10);
+    currentInterval = m;
+  } catch (e) {
+    console.error(`[scheduler] 설정 읽기 실패 — 기본 ${m}분으로 예약:`, e.message);
+  }
   if (nextTimer) clearTimeout(nextTimer);
   nextTimer = setTimeout(async () => {
-    await runCollectCycle('cron');   // 락으로 보호 — 실행 중이면 즉시 스킵
-    scheduleNext();                  // 끝난 뒤에야 다음 주기 예약 → 겹침 불가
+    try {
+      await runCollectCycle('cron'); // 락으로 보호 — 실행 중이면 즉시 스킵
+    } catch (e) {
+      // runCollectCycle 은 스스로 삼키지만, 만에 하나를 위해 한 겹 더 둔다.
+      console.error('[scheduler] 주기 실행 예외(무시하고 계속):', e.message);
+    } finally {
+      scheduleNext(); // 무슨 일이 있어도 다음 주기는 예약한다
+    }
   }, m * 60000);
   console.log(`[scheduler] 다음 정기 수집 예약: ${m}분 후`);
+}
+
+// ---- 워치독 ----
+// 위 두 겹을 다 뚫고도 활동이 끊기는 경우가 있다: 프로세스가 통째로 얼었다 깨어난 뒤
+// (Railway 절전·호스트 정지) 타이머가 유실되거나, 락이 참인 채로 남는 경우.
+// '마지막 활동'이 30분 넘게 갱신되지 않으면 락을 풀고 예약을 새로 잡고 즉시 1회 수집한다.
+// 정지 판정 임계값. 30분 고정으로 두면 수집 간격을 30분 이상으로 설정한 순간
+// 매 점검마다 오발동해 수집을 계속 덧돌린다. 간격의 3배와 30분 중 큰 값을 쓴다.
+// (상태바·/health/watch 도 같은 잣대를 써야 화면과 워치독이 어긋나지 않는다)
+function stallThresholdMs() {
+  const interval = currentInterval || 10;
+  return Math.max(WATCHDOG_STALL_MS, interval * 3 * 60000);
+}
+
+function watchdogTick() {
+  const now = Date.now();
+  const last = lastActivityMs();
+  // 부팅 직후(기록 없음)에는 시작 시각을 기준으로 삼아 헛발질을 막는다
+  const base = last || bootMs;
+  const idleMs = now - base;
+  if (idleMs < stallThresholdMs()) return;
+
+  const mins = Math.round(idleMs / 60000);
+  heartbeat.restarts += 1;
+  console.error(
+    `[watchdog] ${mins}분간 수집 활동 없음 — 감시 루프 재시작 #${heartbeat.restarts} ` +
+      `(isCollecting=${isCollecting}, timer=${nextTimer ? '있음' : '없음'})`
+  );
+
+  // 사이클 상한(5분)의 6배가 지났다 → 살아 있는 수집일 수 없다. 락을 강제로 푼다.
+  isCollecting = false;
+  if (nextTimer) clearTimeout(nextTimer);
+  nextTimer = null;
+  beat({ restarts: heartbeat.restarts });
+
+  // 같은 정지 구간에서 매분 보내지 않도록 임계값 간격으로 한 번만 알린다.
+  if (now - stallAlertedMs > stallThresholdMs()) {
+    stallAlertedMs = now;
+    sendTelegram(
+      '⚠️ <b>새싹 레이더 감시 정지 감지</b>\n' +
+        `${mins}분간 수집이 멈춰 있어 루프를 자동 재시작했습니다.`
+    ).catch(() => {});
+  }
+
+  scheduleNext();
+  runCollectCycle('watchdog').catch((e) =>
+    console.error('[watchdog] 재시작 수집 예외:', e.message)
+  );
+}
+
+// ---- Railway 절전 대비 자체 keep-alive ----
+// Railway 의 App Sleeping(서버리스)이 켜져 있으면 인바운드 요청이 없을 때 앱이 잠든다.
+// 잠들면 타이머가 서지 않아 감시가 통째로 멈춘다. 자기 공개 URL 을 주기적으로 때리면
+// 그게 인바운드 트래픽이라 유휴 타이머가 계속 초기화된다.
+//   · 한계: 이미 잠든 뒤에는 스스로 깨우지 못한다 → 절전 자체를 끄는 게 정답이고,
+//     이건 보조 수단이다. 외부 모니터(UptimeRobot 등)로 /health 를 때리면 확실하다.
+const KEEPALIVE_MS = envMin('KEEPALIVE_MIN', 5);
+
+function keepAliveUrl() {
+  const explicit = process.env.KEEPALIVE_URL || process.env.PUBLIC_URL;
+  if (explicit) return explicit.replace(/\/+$/, '') + '/health';
+  const domain = process.env.RAILWAY_PUBLIC_DOMAIN; // Railway 가 자동 주입
+  if (domain) return `https://${domain}/health`;
+  return null;
+}
+
+function startKeepAlive() {
+  const url = keepAliveUrl();
+  if (!url) {
+    console.log(
+      '[keepalive] 공개 URL 을 알 수 없어 자체 핑을 생략합니다 ' +
+        '(Railway 절전을 끄거나 KEEPALIVE_URL 을 설정하세요)'
+    );
+    return;
+  }
+  console.log(`[keepalive] ${KEEPALIVE_MS / 60000}분 간격 자체 핑: ${url}`);
+  setInterval(async () => {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) console.warn('[keepalive] 응답 상태', res.status);
+    } catch (e) {
+      console.warn('[keepalive] 실패(무시):', e.message);
+    }
+  }, KEEPALIVE_MS);
 }
 
 function rescheduleIfChanged() {
@@ -238,11 +412,10 @@ app.get('/', (req, res) => {
     .join('');
 
   const nowMs = Date.now();
-  const rel = relativeTime(runtime.lastCheckAt, nowMs);
-  const okText =
-    runtime.lastCheckOk === null ? '대기 중' : runtime.lastCheckOk ? '감시 정상' : '수집 실패';
-  const dotClass =
-    runtime.lastCheckOk === false ? 'dot-bad' : runtime.lastCheckOk === null ? 'dot-wait' : 'dot-ok';
+  const w = watchStatus(nowMs);
+  const rel = w.rel;
+  const okText = w.text;
+  const dotClass = w.dot;
   const condChips = conditionChips(s);
   const planner = renderPlanner();
 
@@ -1134,8 +1307,17 @@ app.get('/api/summary', (req, res) => {
 
     res.json({
       status: {
-        ok: runtime.lastCheckOk === true,
-        lastCheckedAt: runtime.lastCheckAt || null,
+        ok: heartbeat.lastOk === true,
+        // 사이클이 "끝난" 시각. 외부 모니터가 이 값으로 정지를 판정할 수 있다.
+        lastCheckedAt: heartbeat.lastFinishAt || null,
+        lastStartedAt: heartbeat.lastStartAt || null,
+        collecting: isCollecting,
+        staleMinutes: heartbeat.lastFinishAt
+          ? Math.floor((Date.now() - new Date(heartbeat.lastFinishAt).getTime()) / 60000)
+          : null,
+        lastError: heartbeat.lastError || null,
+        lastDurationMs: heartbeat.lastMs != null ? heartbeat.lastMs : null,
+        watchdogRestarts: heartbeat.restarts || 0,
         intervalMinutes: currentInterval || s.intervalMinutes,
         matchedCount: runtime.lastMatchCount,
       },
@@ -1148,7 +1330,26 @@ app.get('/api/summary', (req, res) => {
   }
 });
 
+// 프로세스가 살아 있는지만 본다 (keep-alive 핑 대상 · 항상 200).
 app.get('/health', (req, res) => res.send('ok'));
+
+// 감시 루프가 실제로 도는지 본다. 멈춰 있으면 503 —
+// UptimeRobot 등 외부 모니터를 이 주소로 걸어 두면 감시 정지를 문자로 받을 수 있다.
+app.get('/health/watch', (req, res) => {
+  const now = Date.now();
+  const finishedAt = heartbeat.lastFinishAt;
+  const idleMs = finishedAt ? now - new Date(finishedAt).getTime() : now - bootMs;
+  const stallMs = stallThresholdMs();
+  const stale = idleMs > stallMs;
+  res.status(stale ? 503 : 200).json({
+    ok: !stale,
+    lastCheckedAt: finishedAt || null,
+    idleMinutes: Math.floor(idleMs / 60000),
+    stallMinutes: Math.round(stallMs / 60000),
+    collecting: isCollecting,
+    watchdogRestarts: heartbeat.restarts || 0,
+  });
+});
 
 // ---- helpers ----
 function escapeHtml(s) {
@@ -1176,6 +1377,22 @@ function instLabel(institution, title) {
 }
 
 // 상대시각 "N분 전" (초 단위 제거)
+// 상태바 한 줄. '마지막 확인'은 사이클이 "끝난" 시각을 쓴다 —
+// 시작 시각을 쓰면 매달려 죽은 사이클이 한동안 '방금 확인'으로 보여 사고를 못 알아챈다.
+// 간격의 3배(최소 30분)를 넘겨 멈춰 있으면 정상이 아니라고 못 박는다.
+function watchStatus(nowMs) {
+  const finishedAt = heartbeat.lastFinishAt;
+  const rel = relativeTime(finishedAt, nowMs);
+  const idleMs = finishedAt ? nowMs - new Date(finishedAt).getTime() : Infinity;
+  const stallMs = stallThresholdMs();
+
+  if (isCollecting) return { rel, text: '확인 중', dot: 'dot-wait' };
+  if (!finishedAt) return { rel, text: '대기 중', dot: 'dot-wait' };
+  if (idleMs > stallMs) return { rel, text: '감시 지연', dot: 'dot-bad' };
+  if (heartbeat.lastOk === false) return { rel, text: '수집 실패', dot: 'dot-bad' };
+  return { rel, text: '감시 정상', dot: 'dot-ok' };
+}
+
 function relativeTime(iso, nowMs) {
   if (!iso) return '확인 전';
   const t = new Date(iso).getTime();
@@ -2054,6 +2271,15 @@ app.listen(PORT, () => {
   } catch (e) {
     console.error('[server] 분류 이관 실패(계속 진행):', e.message);
   }
+  // 이전 프로세스의 하트비트를 되읽는다 — 재배포 직후 '확인 전'으로 보이지 않게.
+  loadHeartbeat();
+  if (heartbeat.lastFinishAt) {
+    console.log(
+      `[heartbeat] 이전 기록 로드: 마지막 확인 ${heartbeat.lastFinishAt} ` +
+        `(ok=${heartbeat.lastOk}, 워치독 재시작 누적 ${heartbeat.restarts || 0}회)`
+    );
+  }
+
   // 정기 수집 스케줄 시작(설정 간격 기준). 이후 매 주기는 '끝난 뒤' 스스로 재예약.
   scheduleNext();
 
@@ -2062,6 +2288,22 @@ app.listen(PORT, () => {
     checkReminders().catch((e) => console.error('[reminder] 예외:', e.message));
   }, 60000);
   console.log('[server] 오픈 리마인더 스케줄 등록 (1분 간격)');
+
+  // 워치독: 수집 활동이 30분 넘게 끊기면 락을 풀고 루프를 되살린다.
+  setInterval(() => {
+    try {
+      watchdogTick();
+    } catch (e) {
+      console.error('[watchdog] 점검 예외(무시):', e.message);
+    }
+  }, WATCHDOG_TICK_MS);
+  console.log(
+    `[server] 워치독 등록 (${WATCHDOG_TICK_MS / 60000}분 간격 점검 · ` +
+      `${WATCHDOG_STALL_MS / 60000}분 정지 시 재시작)`
+  );
+
+  // Railway 절전 대비 자체 핑 (공개 URL 을 알 때만)
+  startKeepAlive();
 
   // 서버 시작 30초 후 첫 수집 — 동일 락을 통과(예약 주기와 겹쳐도 하나만 실행).
   setTimeout(() => {

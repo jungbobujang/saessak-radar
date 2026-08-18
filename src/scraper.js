@@ -50,6 +50,26 @@ const COMPETENCE_MAP = {
   C0304: '데이터 소양',
 };
 
+// ---- 타임아웃 ------------------------------------------------------------
+// page.evaluate 는 기본 타임아웃이 없다. 페이지 안 fetch 가 응답을 영원히 안 주면
+// evaluate 가 영원히 매달리고, 그러면 scrape → checkOnce → 스케줄러 체인이 통째로
+// 멈춘다(다음 주기를 예약하는 코드에 도달하지 못한다). 실제로 그렇게 감시가 죽었다.
+// 그래서 ① 페이지 안 fetch 마다 AbortSignal 로 개별 타임아웃을 걸고,
+//        ② evaluate 전체에도 상한을 둔다. 상한을 넘기면 예외로 끝나 finally 의
+//           browser.close() 가 돌고(= 매달린 evaluate 도 함께 죽는다) 다음 주기가 산다.
+const IN_PAGE_FETCH_TIMEOUT_MS = 20000; // 사이트 API 1건당 상한
+const LIST_EVAL_TIMEOUT_MS = 90000;     // 목록 페이지네이션 전체 상한
+const DETAIL_EVAL_TIMEOUT_MS = 120000;  // 상세 순차 조회 전체 상한
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    const human = ms >= 1000 ? `${Math.round(ms / 1000)}초` : `${ms}ms`;
+    timer = setTimeout(() => reject(new Error(`${label} 타임아웃 (${human} 초과)`)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 function pad2(x) {
   return String(x == null ? '' : x).padStart(2, '0');
 }
@@ -150,8 +170,8 @@ function mapItem(item) {
  * (모집 상태만 C1101,C1102 로 좁혀 응답량을 줄인다.)
  */
 async function fetchAllInPage(page, apiPath, season, version) {
-  return await page.evaluate(
-    async ({ apiPath, season, version }) => {
+  const work = page.evaluate(
+    async ({ apiPath, season, version, fetchTimeoutMs }) => {
       const size = 100; // 페이지당 최대치. 아래에서 끝까지 순회한다.
       let pageNo = 1;
       let all = [];
@@ -161,7 +181,11 @@ async function fetchAllInPage(page, apiPath, season, version) {
           apiPath +
           `?operationStatusCode=C1101,C1102&page=${pageNo}&size=${size}` +
           `&season=${encodeURIComponent(season)}&version=${encodeURIComponent(version)}`;
-        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        // 응답이 영영 안 오는 경우(오픈 직후 사이트 폭주 등)를 끊는다.
+        const res = await fetch(url, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(fetchTimeoutMs),
+        });
         if (!res.ok) throw new Error('API 응답 오류 status=' + res.status);
         const j = await res.json();
         const content = j.content || [];
@@ -179,8 +203,9 @@ async function fetchAllInPage(page, apiPath, season, version) {
       }
       return all;
     },
-    { apiPath, season, version }
+    { apiPath, season, version, fetchTimeoutMs: IN_PAGE_FETCH_TIMEOUT_MS }
   );
+  return await withTimeout(work, LIST_EVAL_TIMEOUT_MS, '목록 API 수집');
 }
 
 /**
@@ -268,14 +293,16 @@ async function fetchDetails(programIds) {
 
     // 상세 API 는 현재 season·version 없이도 동일한 응답을 준다(실측 확인).
     // 다만 목록 API 처럼 언제든 필수가 될 수 있어 같은 파라미터를 함께 보낸다.
-    const bodies = await page.evaluate(
-      async ({ apiBase, ids, season, version }) => {
+    const detailWork = page.evaluate(
+      async ({ apiBase, ids, season, version, fetchTimeoutMs }) => {
         const qs = `?season=${encodeURIComponent(season)}&version=${encodeURIComponent(version)}`;
         const out = {};
         for (const pid of ids) {
           try {
+            // 1건이 매달리면 전체가 매달린다. 건마다 상한을 걸고 실패는 그 건만 버린다.
             const r = await fetch(apiBase + '/' + pid + qs, {
               headers: { Accept: 'application/json' },
+              signal: AbortSignal.timeout(fetchTimeoutMs),
             });
             out[pid] = r.ok ? await r.json() : { __error: 'status ' + r.status };
           } catch (e) {
@@ -284,8 +311,15 @@ async function fetchDetails(programIds) {
         }
         return out;
       },
-      { apiBase: DETAIL_API, ids, season: seasonYear(), version: API_VERSION }
+      {
+        apiBase: DETAIL_API,
+        ids,
+        season: seasonYear(),
+        version: API_VERSION,
+        fetchTimeoutMs: IN_PAGE_FETCH_TIMEOUT_MS,
+      }
     );
+    const bodies = await withTimeout(detailWork, DETAIL_EVAL_TIMEOUT_MS, '상세 API 수집');
 
     const result = {};
     for (const pid of ids) {
@@ -312,6 +346,7 @@ async function fetchDetails(programIds) {
 module.exports = {
   scrape,
   fetchDetails,
+  withTimeout,
   mapDetail,
   seasonYear,
   API_VERSION,
