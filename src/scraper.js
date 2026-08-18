@@ -58,8 +58,15 @@ const COMPETENCE_MAP = {
 //        ② evaluate 전체에도 상한을 둔다. 상한을 넘기면 예외로 끝나 finally 의
 //           browser.close() 가 돌고(= 매달린 evaluate 도 함께 죽는다) 다음 주기가 산다.
 const IN_PAGE_FETCH_TIMEOUT_MS = 20000; // 사이트 API 1건당 상한
-const LIST_EVAL_TIMEOUT_MS = 90000;     // 목록 페이지네이션 전체 상한
-const DETAIL_EVAL_TIMEOUT_MS = 120000;  // 상세 순차 조회 전체 상한
+const LIST_EVAL_TIMEOUT_MS = 60000;     // 목록 페이지네이션 전체 상한
+const DETAIL_EVAL_TIMEOUT_MS = 60000;   // 상세 순차 조회 전체 상한
+const LAUNCH_TIMEOUT_MS = 30000;        // 크롬 기동
+const GOTO_TIMEOUT_MS = 30000;          // page.goto
+const IDLE_TIMEOUT_MS = 20000;          // networkidle 대기(넘겨도 계속 진행)
+// 스크래퍼 1회(기동+접속+수집+정리) 전체 상한. 안쪽 상한들의 합보다 작게 잡아
+// 무엇이 늦든 90초 안에는 반드시 끝나게 한다. 서버의 사이클 상한(4분)보다 훨씬 짧아야
+// 사이클이 끊기기 전에 스크래퍼가 스스로 브라우저를 닫는다.
+const SCRAPE_TIMEOUT_MS = Number(process.env.SCRAPE_TIMEOUT_MS) || 90000;
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -68,6 +75,46 @@ function withTimeout(promise, ms, label) {
     timer = setTimeout(() => reject(new Error(`${label} 타임아웃 (${human} 초과)`)), ms);
   });
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
+// 브라우저를 띄우고 → 일을 시키고 → 무슨 일이 있어도 닫는다.
+//
+// 이 함수가 지키는 것 두 가지:
+//  ① 전체 상한(SCRAPE_TIMEOUT_MS). 어느 단계가 매달려도 90초 안에 예외로 끝난다.
+//  ② 정리. 컨텍스트·브라우저를 finally 에서 닫는다. 타임아웃으로 빠져나갈 때도 여기를
+//     지나므로, 매달린 page.evaluate 는 브라우저가 닫히면서 함께 죽는다.
+//     닫기가 실패해도(이미 죽은 프로세스 등) 삼킨다 — 다음 주기를 막을 이유가 없다.
+//
+// 수집 1회마다 새로 띄우고 끝나면 완전히 종료한다. 브라우저를 재사용하면 세션·메모리가
+// 쌓이고, 한 번 이상해진 인스턴스가 이후 모든 주기를 오염시킨다.
+async function runInBrowser(label, fn) {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    timeout: LAUNCH_TIMEOUT_MS,
+  });
+  let context;
+  try {
+    context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      locale: 'ko-KR',
+      viewport: { width: 1366, height: 900 },
+    });
+    const page = await context.newPage();
+    return await withTimeout(fn(page), SCRAPE_TIMEOUT_MS, `스크래퍼(${label})`);
+  } finally {
+    try {
+      if (context) await context.close();
+    } catch (e) {
+      console.warn(`[scraper] ${label} context.close 실패(무시):`, e.message);
+    }
+    try {
+      await browser.close();
+    } catch (e) {
+      console.warn(`[scraper] ${label} browser.close 실패(무시):`, e.message);
+    }
+  }
 }
 
 function pad2(x) {
@@ -213,26 +260,11 @@ async function fetchAllInPage(page, apiPath, season, version) {
  * 카드가 0개면 에러를 던져 잘못된 "전부 사라짐" diff 방지.
  */
 async function scrape() {
-  // launch에 timeout(30초) — 크롬 기동이 멈춰도 그 주기는 예외로 끝나고 다음 주기에 재시도.
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    timeout: 30000,
-  });
-
-  try {
-    const context = await browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      locale: 'ko-KR',
-      viewport: { width: 1366, height: 900 },
-    });
-    const page = await context.newPage();
-
+  return await runInBrowser('목록 수집', async (page) => {
     console.log('[scraper] 접속:', LIST_URL);
     // 세션/오리진 확보 (SPA 부트스트랩). networkidle까지 대기.
-    await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {
+    await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: GOTO_TIMEOUT_MS });
+    await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {
       console.log('[scraper] networkidle 타임아웃 — 계속 진행');
     });
 
@@ -254,14 +286,7 @@ async function scrape() {
     }
 
     return cards;
-  } finally {
-    // close 자체가 실패해도(이미 죽은 프로세스 등) 다음 주기를 막지 않도록 삼켜서 처리.
-    try {
-      await browser.close();
-    } catch (e) {
-      console.warn('[scraper] scrape browser.close 실패(무시):', e.message);
-    }
-  }
+  });
 }
 
 /**
@@ -274,22 +299,9 @@ async function fetchDetails(programIds) {
   const ids = Array.from(new Set((programIds || []).filter((x) => x != null)));
   if (ids.length === 0) return {};
 
-  // launch에 timeout(30초) — 상세 수집용 크롬 기동이 멈춰도 예외로 끝나 다음 주기에 재시도.
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    timeout: 30000,
-  });
-  try {
-    const context = await browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      locale: 'ko-KR',
-      viewport: { width: 1366, height: 900 },
-    });
-    const page = await context.newPage();
-    await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+  return await runInBrowser('상세 수집', async (page) => {
+    await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: GOTO_TIMEOUT_MS });
+    await page.waitForLoadState('networkidle', { timeout: IDLE_TIMEOUT_MS }).catch(() => {});
 
     // 상세 API 는 현재 season·version 없이도 동일한 응답을 준다(실측 확인).
     // 다만 목록 API 처럼 언제든 필수가 될 수 있어 같은 파라미터를 함께 보낸다.
@@ -333,14 +345,7 @@ async function fetchDetails(programIds) {
     }
     console.log(`[scraper] 상세 수집 ${Object.keys(result).length}/${ids.length}건`);
     return result;
-  } finally {
-    // close 실패가 다음 주기를 막지 않도록 삼켜서 처리.
-    try {
-      await browser.close();
-    } catch (e) {
-      console.warn('[scraper] fetchDetails browser.close 실패(무시):', e.message);
-    }
-  }
+  });
 }
 
 module.exports = {

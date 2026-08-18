@@ -160,12 +160,21 @@ const envMin = (name, def) => {
 // 사이클 상한은 스크래퍼가 스스로 끊는 시간(최악 약 6.3분: launch/goto/evaluate 상한의 합)
 // 보다 커야 한다. 더 짧으면 스크래퍼가 browser.close() 로 정리하기 전에 락이 풀려
 // 다음 사이클의 크로뮴과 겹친다(예전 spawn EAGAIN 의 원인). 여기는 최후의 그물이다.
-const CYCLE_TIMEOUT_MS = envMin('CYCLE_TIMEOUT_MIN', 7);     // 한 사이클 상한 (scrape+상세 합계)
+// 상한들은 서로 사슬로 묶여 있다. 안쪽이 먼저 끊겨야 바깥이 헛돌지 않는다.
+//   스크래퍼 1회(90초) < 사이클 상한(4분) < 죽은 락 판정(5분) < 워치독(30분)
+// 이 순서가 깨지면 사고가 난다 — 죽은 락 판정이 사이클 상한보다 짧으면
+// 살아 있는 수집을 죽은 것으로 오인해 크로뮴이 겹쳐 뜬다(spawn EAGAIN).
+const CYCLE_TIMEOUT_MS = envMin('CYCLE_TIMEOUT_MIN', 4);     // 한 사이클 상한 (scrape+상세 합계)
 const WATCHDOG_TICK_MS = envMin('WATCHDOG_TICK_MIN', 1);     // 워치독 점검 주기
 const WATCHDOG_STALL_MS = envMin('WATCHDOG_STALL_MIN', 30);  // 이만큼 활동이 없으면 루프를 재시작
+// 진행 중 플래그가 이 시간을 넘겨 잡혀 있으면 죽은 락으로 보고 강제 해제한다.
+// 사이클 상한보다 반드시 커야 한다 — 설정을 잘못 줘도 아래 보정으로 지켜진다.
+const STALE_LOCK_MS = Math.max(envMin('STALE_LOCK_MIN', 5), CYCLE_TIMEOUT_MS + 60000);
 
 let currentInterval = null;  // 대시보드/요약 노출용(현재 적용 간격)
 let isCollecting = false;    // 단일 실행 락 — 수집(scrape+fetchDetails) 1건만 진행
+let collectStartedMs = 0;    // 그 락을 언제 잡았는지 (죽은 락 판정용)
+let staleUnlocks = 0;        // 죽은 락을 강제로 푼 누적 횟수
 let nextTimer = null;        // 다음 주기 예약 타이머 핸들
 let stallAlertedMs = 0;      // 같은 정지 구간에서 텔레그램 도배 방지
 
@@ -179,6 +188,8 @@ const heartbeat = {
   lastReason: null,
   lastMs: null,
   restarts: 0,         // 워치독이 되살린 누적 횟수
+  failStreak: 0,       // 연속 수집 실패 횟수 (성공하면 0)
+  staleUnlocks: 0,     // 죽은 락을 강제로 푼 누적 횟수
 };
 
 function loadHeartbeat() {
@@ -211,11 +222,28 @@ function lastActivityMs() {
 // 어떤 경로로 끝나든(성공·에러·타임아웃) finally 에서 락을 반드시 해제 → 다음 주기 정상 진행.
 async function runCollectCycle(reason) {
   if (isCollecting) {
-    console.log(`[scheduler] 이전 수집이 아직 진행 중 — 이번 주기(${reason}) 건너뜀`);
-    return { ok: false, skipped: true, error: '이미 수집이 진행 중입니다.' };
+    // 락이 언제부터 잡혀 있었는지 본다. 정상 사이클은 길어야 CYCLE_TIMEOUT_MS 안에 끝나므로,
+    // STALE_LOCK_MS 를 넘겼다면 그 사이클은 죽은 것이다(프로세스 정지·크롬 hang 등).
+    // 이 검사가 없으면 락이 영영 안 풀려 이후 모든 수집이 '이미 진행 중' 으로 거부된다.
+    // — 2026-08-18 실제로 6시간 멈췄다. 워치독(30분)만으로는 첫 30분을 못 살린다.
+    const heldMs = collectStartedMs ? Date.now() - collectStartedMs : Infinity;
+    if (heldMs < STALE_LOCK_MS) {
+      console.log(
+        `[scheduler] 이전 수집이 아직 진행 중(${Math.round(heldMs / 1000)}초 경과) — 이번 주기(${reason}) 건너뜀`
+      );
+      return { ok: false, skipped: true, error: '이미 수집이 진행 중입니다.' };
+    }
+    staleUnlocks += 1;
+    console.error(
+      `[scheduler] 진행 중 플래그가 ${Math.round(heldMs / 60000)}분째 잡혀 있습니다 — ` +
+        `죽은 락으로 보고 강제 해제 후 재실행 (누적 ${staleUnlocks}회)`
+    );
+    beat({ staleUnlocks });
+    isCollecting = false;
   }
   isCollecting = true;
   const startedMs = Date.now();
+  collectStartedMs = startedMs;
   beat({ lastStartAt: new Date(startedMs).toISOString(), lastReason: reason });
   try {
     console.log(`[scheduler] 정기 수집 시작 (reason=${reason})`);
@@ -227,6 +255,8 @@ async function runCollectCycle(reason) {
       lastOk: r && r.ok !== false,
       lastError: r && r.ok === false ? r.error || '알 수 없음' : null,
       lastMs: Date.now() - startedMs,
+      // 연속 실패 횟수 — 성공하면 0 으로 되돌린다. 상태바가 이 값을 보여 준다.
+      failStreak: r && r.ok !== false ? 0 : (heartbeat.failStreak || 0) + 1,
     });
     return r;
   } catch (e) {
@@ -237,10 +267,13 @@ async function runCollectCycle(reason) {
       lastOk: false,
       lastError: e.message,
       lastMs: Date.now() - startedMs,
+      failStreak: (heartbeat.failStreak || 0) + 1,
     });
     return { ok: false, error: e.message };
   } finally {
+    // 어떤 경로로 끝나든(성공·에러·타임아웃) 여기서 반드시 푼다.
     isCollecting = false;
+    collectStartedMs = 0;
   }
 }
 
@@ -454,7 +487,11 @@ app.get('/', (req, res) => {
 
     ${sections}
 
-    ${runtime.lastError ? `<div class="card err">마지막 오류: ${escapeHtml(runtime.lastError)}</div>` : ''}
+    ${(heartbeat.lastError || runtime.lastError) ? `<div class="card err">
+      마지막 오류: ${escapeHtml(heartbeat.lastError || runtime.lastError)}
+      ${w.streak > 1 ? ` · <b>${w.streak}회 연속 실패</b>` : ''}
+      ${heartbeat.staleUnlocks ? ` · 죽은 락 해제 ${heartbeat.staleUnlocks}회` : ''}
+    </div>` : ''}
 
     <script>
       const btn = document.getElementById('checkBtn');
@@ -1318,6 +1355,8 @@ app.get('/api/summary', (req, res) => {
         lastError: heartbeat.lastError || null,
         lastDurationMs: heartbeat.lastMs != null ? heartbeat.lastMs : null,
         watchdogRestarts: heartbeat.restarts || 0,
+        failStreak: heartbeat.failStreak || 0,
+        staleUnlocks: heartbeat.staleUnlocks || 0,
         intervalMinutes: currentInterval || s.intervalMinutes,
         matchedCount: runtime.lastMatchCount,
       },
@@ -1340,14 +1379,21 @@ app.get('/health/watch', (req, res) => {
   const finishedAt = heartbeat.lastFinishAt;
   const idleMs = finishedAt ? now - new Date(finishedAt).getTime() : now - bootMs;
   const stallMs = stallThresholdMs();
-  const stale = idleMs > stallMs;
+  // 멈춘 것만 문제가 아니다 — 제때 돌면서 계속 실패하는 것도 감시가 안 되는 상태다.
+  // 밖에서 보면 둘 다 '알림이 안 온다' 로 같으므로 외부 모니터에는 똑같이 503 으로 알린다.
+  const streak = heartbeat.failStreak || 0;
+  const stale = idleMs > stallMs || streak >= 3;
   res.status(stale ? 503 : 200).json({
     ok: !stale,
+    reason: idleMs > stallMs ? 'stalled' : streak >= 3 ? 'failing' : null,
     lastCheckedAt: finishedAt || null,
     idleMinutes: Math.floor(idleMs / 60000),
     stallMinutes: Math.round(stallMs / 60000),
     collecting: isCollecting,
     watchdogRestarts: heartbeat.restarts || 0,
+    failStreak: heartbeat.failStreak || 0,
+    staleUnlocks: heartbeat.staleUnlocks || 0,
+    lastError: heartbeat.lastError || null,
   });
 });
 
@@ -1386,11 +1432,21 @@ function watchStatus(nowMs) {
   const idleMs = finishedAt ? nowMs - new Date(finishedAt).getTime() : Infinity;
   const stallMs = stallThresholdMs();
 
-  if (isCollecting) return { rel, text: '확인 중', dot: 'dot-wait' };
-  if (!finishedAt) return { rel, text: '대기 중', dot: 'dot-wait' };
-  if (idleMs > stallMs) return { rel, text: '감시 지연', dot: 'dot-bad' };
-  if (heartbeat.lastOk === false) return { rel, text: '수집 실패', dot: 'dot-bad' };
-  return { rel, text: '감시 정상', dot: 'dot-ok' };
+  const streak = heartbeat.failStreak || 0;
+
+  if (isCollecting) return { rel, text: '확인 중', dot: 'dot-wait', streak };
+  if (!finishedAt) return { rel, text: '대기 중', dot: 'dot-wait', streak };
+  // 간격의 3배(최소 30분)를 넘겨 멈춰 있으면 '정상'이라고 말하지 않는다.
+  if (idleMs > stallMs) return { rel, text: '감시 지연', dot: 'dot-bad', streak };
+  if (heartbeat.lastOk === false) {
+    return {
+      rel,
+      text: streak > 1 ? `수집 실패 ${streak}회 연속` : '수집 실패',
+      dot: 'dot-bad',
+      streak,
+    };
+  }
+  return { rel, text: '감시 정상', dot: 'dot-ok', streak };
 }
 
 function relativeTime(iso, nowMs) {
