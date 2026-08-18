@@ -467,7 +467,9 @@ app.get('/', (req, res) => {
 
   res.send(pageShell('새싹 레이더', `
     <div class="header">
-      <div class="logo">🌱 새싹 레이더</div>
+      <!-- 이미 대시보드다 → 눌러도 이동이 아니라 새로고침. href 는 그대로 두어
+           JS 가 죽어도, 새 탭으로 열어도 대시보드로 가게 한다. -->
+      <a class="logo" href="/" id="logoHome" title="새로고침" aria-label="대시보드 새로고침">🌱 새싹 레이더</a>
       <a class="navlink" href="/settings">⚙️ 설정</a>
     </div>
 
@@ -494,6 +496,18 @@ app.get('/', (req, res) => {
     </div>` : ''}
 
     <script>
+      // 제목을 누르면 새로고침한다. 이미 대시보드라 '/' 로 이동시켜도 되지만,
+      // 그러면 브라우저가 캐시된 화면을 그대로 보여 줄 수 있어 reload 로 최신을 받는다.
+      // 새 탭/가운데 클릭·수정키 조합은 가로채지 않는다 (href 가 그대로 살아 있다).
+      const logo = document.getElementById('logoHome');
+      if (logo) {
+        logo.addEventListener('click', (e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+          e.preventDefault();
+          location.reload();
+        });
+      }
+
       const btn = document.getElementById('checkBtn');
       const out = document.getElementById('checkResult');
       btn.addEventListener('click', async () => {
@@ -800,7 +814,7 @@ app.get('/settings', requireAuth, (req, res) => {
 
   res.send(pageShell('감시 조건 설정', `
     <div class="header">
-      <div class="logo">🌱 감시 조건 설정</div>
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🌱 감시 조건 설정</a>
       <a class="navlink" href="/">← 대시보드</a>
     </div>
 
@@ -1187,7 +1201,7 @@ function authPage(next, failed) {
   const nextVal = safeNext(next);
   return pageShell('설정 로그인', `
     <div class="header">
-      <div class="logo">🔒 설정 로그인</div>
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🔒 설정 로그인</a>
       <a class="navlink" href="/">← 대시보드</a>
     </div>
     <form method="POST" action="/auth" class="card" style="max-width:420px;">
@@ -2050,6 +2064,19 @@ function pageShell(title, body) {
   .wrap { max-width: 780px; margin:0 auto; padding: 18px 16px 60px; }
   .header { display:flex; align-items:center; justify-content:space-between; margin: 8px 0 18px; }
   .logo { font-size: 22px; font-weight: 800; letter-spacing:-0.02em; }
+  /* 제목은 누르는 자리다 — 대시보드에서는 새로고침, 다른 화면에서는 홈으로.
+     글자 색·크기는 그대로 두고(제목처럼 보여야 한다) 누를 수 있다는 것만 알린다. */
+  a.logo { color:inherit; text-decoration:none; cursor:pointer;
+    display:inline-flex; align-items:center; gap:2px;
+    padding:4px 8px; margin:-4px -8px; border-radius:10px; /* 여백은 음수 마진으로 상쇄 */
+    transition: background .12s ease; }
+  a.logo:hover, a.logo:focus-visible { background:var(--surface-2); }
+  a.logo:focus-visible { outline:2px solid var(--green-d); outline-offset:1px; }
+  a.logo:active { transform: translateY(1px); }
+  @media (prefers-reduced-motion: reduce) {
+    a.logo { transition:none; }
+    a.logo:active { transform:none; }
+  }
   .navlink { color:var(--green-d); text-decoration:none; font-weight:600; font-size:14px;
     background:var(--surface-2); padding:8px 12px; border-radius:10px; border:1px solid var(--line); }
   .navlink:hover { background:var(--surface-1); }
