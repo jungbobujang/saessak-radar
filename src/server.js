@@ -175,6 +175,7 @@ let currentInterval = null;  // 대시보드/요약 노출용(현재 적용 간�
 let isCollecting = false;    // 단일 실행 락 — 수집(scrape+fetchDetails) 1건만 진행
 let collectStartedMs = 0;    // 그 락을 언제 잡았는지 (죽은 락 판정용)
 let staleUnlocks = 0;        // 죽은 락을 강제로 푼 누적 횟수
+let pendingManualCheck = false; // 수집 중에 눌린 '즉시 확인' — 끝나면 한 번 이어서 돈다
 let nextTimer = null;        // 다음 주기 예약 타이머 핸들
 let stallAlertedMs = 0;      // 같은 정지 구간에서 텔레그램 도배 방지
 
@@ -228,6 +229,18 @@ async function runCollectCycle(reason) {
     // — 2026-08-18 실제로 6시간 멈췄다. 워치독(30분)만으로는 첫 30분을 못 살린다.
     const heldMs = collectStartedMs ? Date.now() - collectStartedMs : Infinity;
     if (heldMs < STALE_LOCK_MS) {
+      // 살아 있는 수집이 돌고 있다.
+      //  · 수동 확인은 '거부' 대신 '예약' 한다 — 사람이 누른 것이라 그냥 버리면
+      //    아무 일도 안 일어난 것처럼 보인다. 끝나는 즉시 한 번 이어서 돈다.
+      //    여러 번 눌러도 예약은 하나뿐이다(플래그라 중복이 쌓이지 않는다).
+      //  · 정기·워치독 주기는 예전대로 건너뛴다. 어차피 곧 다음 주기가 온다.
+      if (reason === 'manual') {
+        pendingManualCheck = true;
+        console.log(
+          `[scheduler] 수집 진행 중(${Math.round(heldMs / 1000)}초 경과) — 수동 확인을 예약합니다`
+        );
+        return { ok: false, queued: true, error: null };
+      }
       console.log(
         `[scheduler] 이전 수집이 아직 진행 중(${Math.round(heldMs / 1000)}초 경과) — 이번 주기(${reason}) 건너뜀`
       );
@@ -274,6 +287,20 @@ async function runCollectCycle(reason) {
     // 어떤 경로로 끝나든(성공·에러·타임아웃) 여기서 반드시 푼다.
     isCollecting = false;
     collectStartedMs = 0;
+
+    // 도는 동안 눌린 '즉시 확인' 이 있으면 여기서 이어서 한 번 돈다.
+    // 플래그를 먼저 내리는 이유: 이어지는 수집 중에 또 누르면 그때 다시 켜져야 한다.
+    // 이 재실행 자체는 reason='manual' 이라, 만에 하나 또 겹치면 다시 예약될 뿐이다.
+    // await 하지 않는다 — 지금 이 함수는 앞선 요청의 응답을 붙들고 있는 중일 수 있다.
+    if (pendingManualCheck) {
+      pendingManualCheck = false;
+      console.log('[scheduler] 예약된 수동 확인을 이어서 실행합니다');
+      setImmediate(() => {
+        runCollectCycle('manual').catch((e) =>
+          console.error('[scheduler] 예약 수동 확인 실패:', e.message)
+        );
+      });
+    }
   }
 }
 
@@ -510,25 +537,40 @@ app.get('/', (req, res) => {
 
       const btn = document.getElementById('checkBtn');
       const out = document.getElementById('checkResult');
+      const BTN_IDLE = '지금 즉시 확인';
+
+      function setResult(text, kind) {
+        // kind: 'ok' | 'wait'(예약·안내) | 'err'(진짜 실패)
+        out.textContent = text;
+        out.className = 'small check-result check-' + kind;
+      }
+      function releaseBtn() {
+        btn.disabled = false;
+        btn.textContent = BTN_IDLE;
+      }
+
       btn.addEventListener('click', async () => {
         btn.disabled = true;
-        btn.textContent = '수집 중…';
+        btn.textContent = '확인 중...';
         out.textContent = '';
+        out.className = 'muted small';
         try {
           const r = await fetch('/api/check-now', { method: 'POST' });
           const d = await r.json();
           if (d.ok) {
-            out.textContent = '완료: 전체 ' + d.total + '건 / 일치 ' + d.matched + '건 / 알림 ' + d.notified + '건. 새로고침합니다…';
+            setResult('완료: 전체 ' + d.total + '건 / 일치 ' + d.matched + '건 / 알림 ' + d.notified + '건. 새로고침합니다…', 'ok');
             setTimeout(() => location.reload(), 1200);
+          } else if (d.queued) {
+            // 실패가 아니다. 지금 도는 수집이 끝나는 대로 서버가 한 번 더 돈다.
+            setResult('확인 예약됨 — 현재 수집이 끝나는 대로 실행합니다', 'wait');
+            releaseBtn();
           } else {
-            out.textContent = '수집 실패: ' + (d.error || '알 수 없음');
-            btn.disabled = false;
-            btn.textContent = '지금 즉시 확인';
+            setResult('수집 실패: ' + (d.error || '알 수 없음'), 'err');
+            releaseBtn();
           }
         } catch (e) {
-          out.textContent = '요청 오류: ' + e.message;
-          btn.disabled = false;
-          btn.textContent = '지금 즉시 확인';
+          setResult('요청 오류: ' + e.message, 'err');
+          releaseBtn();
         }
       });
 
@@ -1266,6 +1308,8 @@ app.post('/api/institutions/:name', requireAuth, (req, res) => {
 app.post('/api/check-now', requireAuth, async (req, res) => {
   try {
     // 수동 확인도 동일 락을 통과 → 정기 수집과 겹쳐 chromium 이 중복 launch 되지 않음.
+    // 이미 돌고 있으면 거부하지 않고 예약한다({ queued: true }) — 화면은 이것을
+    // 실패가 아니라 안내로 보여 준다.
     const result = await runCollectCycle('manual');
     res.json(result);
   } catch (err) {
@@ -2316,6 +2360,12 @@ function pageShell(title, body) {
   .muted { color:var(--muted); }
   .small { font-size:12px; }
   .err { background:#fdeaea; color:#a33; border-color:#f3caca; }
+  /* '지금 즉시 확인' 결과 줄. 큐 대기(파랑)와 진짜 실패(빨강)를 색으로 갈라 놓는다 —
+     예약은 아무것도 잘못되지 않은 상태라 빨간 글씨를 보여 줄 이유가 없다. */
+  .check-result { margin-top:6px; line-height:1.5; }
+  .check-ok   { color:var(--green-d); font-weight:600; }
+  .check-wait { color:#2b6cb0; font-weight:600; }
+  .check-err  { color:#a33; font-weight:600; }
   @media (max-width:560px){
     .grid { grid-template-columns: 1fr; }
     .stat-num { font-size:26px; }
