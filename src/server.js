@@ -479,12 +479,22 @@ app.get('/', (req, res) => {
   const condChips = conditionChips(s);
   const planner = renderPlanner();
 
+  // '지금 즉시 확인' 은 크로미움을 띄워 수집을 돌리는 버튼이라 관리자만 쓴다.
+  // 대시보드 자체는 공개라 로그인 안 한 사람도 이 화면을 본다 — 그 사람에게는
+  // 버튼을 비활성 톤으로 보여 주고, 눌러도 실패가 아니라 안내가 나가게 한다.
+  // 비밀번호를 걸지 않은 로컬에서는 모두가 관리자다(authEnabled() === false).
+  const canRunCheck = !authEnabled() || isAuthed(req);
+  const checkIntervalMin = currentInterval || s.intervalMinutes;
+
   // 섹션 자동 우선순위: 오픈일시 확인된 예정 프로그램이 1개 이상이면 플래너를 위로
   const recentSection = `
     <div class="card">
       <div class="row-between">
         <div class="card-title">최근 감지</div>
-        <button id="checkBtn" class="btn btn-green btn-sm">지금 즉시 확인</button>
+        ${canRunCheck
+          ? '<button id="checkBtn" class="btn btn-green btn-sm">지금 즉시 확인</button>'
+          : `<button id="checkBtn" class="btn btn-sm btn-locked" title="관리자 전용"
+               aria-label="지금 즉시 확인 (관리자 전용)">🔒 지금 즉시 확인</button>`}
       </div>
       <div id="checkResult" class="muted small"></div>
       <div class="loglist">${logRows || '<div class="muted small">아직 감지된 항목이 없습니다.</div>'}</div>
@@ -538,9 +548,13 @@ app.get('/', (req, res) => {
       const btn = document.getElementById('checkBtn');
       const out = document.getElementById('checkResult');
       const BTN_IDLE = '지금 즉시 확인';
+      // 서버가 이 화면을 그릴 때의 로그인 상태. 세션이 만료되면 아래에서 false 로 내린다.
+      let canRun = ${canRunCheck ? 'true' : 'false'};
+      const ADMIN_ONLY =
+        '관리자 전용 기능이에요. 감시는 ${checkIntervalMin}분마다 자동으로 돌고 있으니 그대로 보시면 됩니다 😊';
 
       function setResult(text, kind) {
-        // kind: 'ok' | 'wait'(예약·안내) | 'err'(진짜 실패)
+        // kind: 'ok' | 'wait'(예약·안내) | 'lock'(관리자 전용 안내) | 'err'(진짜 실패)
         out.textContent = text;
         out.className = 'small check-result check-' + kind;
       }
@@ -548,14 +562,29 @@ app.get('/', (req, res) => {
         btn.disabled = false;
         btn.textContent = BTN_IDLE;
       }
+      // 세션이 만료된 채로 화면만 열려 있던 경우. 눌러 본 뒤에야 알 수 있으므로
+      // 그 자리에서 버튼을 잠금 모양으로 바꿔 둔다 (다음에 또 헛수고하지 않게).
+      function lockBtn() {
+        canRun = false;
+        btn.disabled = false;
+        btn.textContent = '🔒 ' + BTN_IDLE;
+        btn.title = '관리자 전용';
+        btn.classList.remove('btn-green');
+        btn.classList.add('btn-locked');
+      }
 
       btn.addEventListener('click', async () => {
+        // 관리자가 아니면 요청 자체를 보내지 않는다 — 어차피 401 이고,
+        // 안 되는 이유를 '실패' 로 알릴 일이 아니라 안내로 알릴 일이다.
+        if (!canRun) { setResult(ADMIN_ONLY, 'lock'); return; }
+
         btn.disabled = true;
         btn.textContent = '확인 중...';
         out.textContent = '';
         out.className = 'muted small';
         try {
           const r = await fetch('/api/check-now', { method: 'POST' });
+          if (r.status === 401) { setResult(ADMIN_ONLY, 'lock'); lockBtn(); return; }
           const d = await r.json();
           if (d.ok) {
             setResult('완료: 전체 ' + d.total + '건 / 일치 ' + d.matched + '건 / 알림 ' + d.notified + '건. 새로고침합니다…', 'ok');
@@ -2340,6 +2369,13 @@ function pageShell(title, body) {
   .btn-green { background:var(--green); color:#fff; }
   .btn-green:hover { background:var(--green-d); }
   .btn-green:disabled { opacity:.6; cursor:default; }
+  /* 관리자 전용 — 비활성 톤이되 진짜 disabled 로 두지는 않는다.
+     disabled 버튼은 툴팁도 안 뜨고 눌러도 반응이 없어, 왜 안 되는지 알 길이 없다.
+     눌리기는 하되 그 자리에서 '관리자 전용' 안내를 보여 주는 편이 친절하다.
+     테두리는 box-shadow 로 그린다 — border 를 쓰면 잠글 때 버튼이 2px 커져 줄이 흔들린다. */
+  .btn-locked { background:var(--surface-1); color:var(--muted);
+    box-shadow: inset 0 0 0 1px var(--line); cursor:help; }
+  .btn-locked:hover { color:var(--text-secondary); }
   .btn-lg { padding:12px 26px; font-size:15px; }
   .btn-sm { padding:7px 12px; font-size:13px; }
   .btn-xs { padding:3px 10px; font-size:12px; border-radius:8px; }
@@ -2360,11 +2396,13 @@ function pageShell(title, body) {
   .muted { color:var(--muted); }
   .small { font-size:12px; }
   .err { background:#fdeaea; color:#a33; border-color:#f3caca; }
-  /* '지금 즉시 확인' 결과 줄. 큐 대기(파랑)와 진짜 실패(빨강)를 색으로 갈라 놓는다 —
-     예약은 아무것도 잘못되지 않은 상태라 빨간 글씨를 보여 줄 이유가 없다. */
+  /* '지금 즉시 확인' 결과 줄. 큐 대기(파랑)·관리자 전용(회색)·진짜 실패(빨강)를
+     색으로 갈라 놓는다 — 예약이나 권한 안내는 아무것도 잘못되지 않은 상태라
+     빨간 글씨를 보여 줄 이유가 없다. */
   .check-result { margin-top:6px; line-height:1.5; }
   .check-ok   { color:var(--green-d); font-weight:600; }
   .check-wait { color:#2b6cb0; font-weight:600; }
+  .check-lock { color:var(--text-secondary); font-weight:600; }
   .check-err  { color:#a33; font-weight:600; }
   @media (max-width:560px){
     .grid { grid-template-columns: 1fr; }
