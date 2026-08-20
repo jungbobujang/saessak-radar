@@ -45,6 +45,8 @@ const {
   sendTelegram,
   fmtKstDateTime,
   ddayKst,
+  notifyPayload,
+  isTelegramConfigured,
 } = require('./watcher');
 const { withTimeout } = require('./scraper');
 
@@ -603,52 +605,63 @@ app.get('/', (req, res) => {
         }
       });
 
-      // ---- 브라우저 알림: 클릭 시 상세페이지 새 탭 열기 ----
-      // 권한이 granted 일 때만 발송한다. 자동으로 requestPermission 을 호출하지 않는다
-      // (사용자 제스처 없는 요청은 크롬이 무시하므로 권한 버튼에서만 요청).
-      function showBrowserNotification(opts) {
-        if (!('Notification' in window)) return false;
-        if (Notification.permission !== 'granted') return false;
+      // ---- 브라우저 알림 / 토스트 ----
+      // 실제 구현은 pageShell 의 saessak 하나뿐이다 (설정 화면과 완전히 공유).
+      function showBrowserNotification(opts) { return saessak.fireNotification(opts) === 'sent'; }
+      function toast(msg) { return saessak.toast(msg); }
+
+      // ---- 알림 자동 발사(폴링) ----
+      // 서버가 감지해 로그에 남긴 항목을 브라우저 알림으로 띄우는 '실제 경로'.
+      // 탭이 열려 있는 동안만 동작한다 — 탭을 닫아도 오는 알림은 텔레그램 쪽이다.
+      // 마지막으로 띄운 시각을 localStorage 에 남겨 중복 발사를 막는다.
+      var NOTIF_SEEN_KEY = 'saessak:lastNotifiedAt';
+      var NOTIF_POLL_MS = 60000;
+
+      async function pollNotifications() {
+        if (saessak.permission() !== 'granted') return; // 권한 없으면 조용히 대기
         try {
-          var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
-          n.onclick = function (e) {
-            e.preventDefault();
-            if (opts.link) window.open(opts.link, '_blank', 'noopener');
-            window.focus();
-            n.close();
-          };
-          return true;
-        } catch (_) { return false; }
+          var r = await fetch('/api/notifications?limit=10', { cache: 'no-store' });
+          if (!r.ok) return;
+          var d = await r.json();
+          var items = (d.items || []).filter(function (it) { return it.at; });
+          if (!items.length) return;
+
+          // 최신순으로 온다 → 발사는 오래된 것부터
+          items = items.slice().reverse();
+          var newest = items[items.length - 1].at;
+          var seen = localStorage.getItem(NOTIF_SEEN_KEY);
+
+          // 첫 방문(기준 없음)에는 기존 로그를 몰아서 띄우지 않고 기준선만 잡는다.
+          if (!seen) { localStorage.setItem(NOTIF_SEEN_KEY, newest); return; }
+
+          var fresh = items.filter(function (it) { return it.at > seen; });
+          for (var i = 0; i < fresh.length; i++) saessak.fireNotification(fresh[i]);
+          if (newest > seen) localStorage.setItem(NOTIF_SEEN_KEY, newest);
+        } catch (_) { /* 네트워크 실패는 다음 주기에 다시 시도 */ }
       }
 
-      // ---- 토스트 ----
-      function toast(msg) {
-        var t = document.getElementById('toast');
-        if (!t) {
-          t = document.createElement('div');
-          t.id = 'toast';
-          t.className = 'toast';
-          document.body.appendChild(t);
-        }
-        t.textContent = msg;
-        t.classList.add('show');
-        clearTimeout(t._timer);
-        t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
-      }
+      setInterval(pollNotifications, NOTIF_POLL_MS);
+      pollNotifications();
+      // 탭으로 돌아왔을 때 즉시 한 번 (백그라운드에서 타이머가 눌린 경우 대비)
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) pollNotifications();
+      });
 
       // ---- 브라우저 알림 권한(상태바 인라인) ----
       // permission 상태에 따라 상태바에 표시. requestPermission 은 "알림 켜기" 버튼 클릭에서만.
       function renderPermInline() {
         var el = document.getElementById('permInline');
         if (!el) return;
-        if (!('Notification' in window)) { el.innerHTML = '<span class="perm-bad">알림 미지원</span>'; return; }
-        var perm = Notification.permission;
-        if (perm === 'granted') { el.innerHTML = '<span class="perm-ok">🔔 브라우저 알림 켜짐</span>'; return; }
+        var perm = saessak.permission();
+        // Notification.permission 원값을 그대로 함께 노출한다 (문제 판별용).
+        var raw = '<code class="permraw">' + perm + '</code>';
+        if (perm === 'unsupported') { el.innerHTML = '<span class="perm-bad">알림 미지원</span>'; return; }
+        if (perm === 'granted') { el.innerHTML = '<span class="perm-ok">🔔 브라우저 알림 켜짐</span> ' + raw; return; }
         if (perm === 'denied') {
-          el.innerHTML = '<span class="perm-bad" title="주소창 자물쇠 → 알림 → 허용으로 변경 후 새로고침">🔕 알림 차단됨 (자물쇠→알림→허용)</span>';
+          el.innerHTML = '<span class="perm-bad" title="주소창 자물쇠 → 알림 → 허용으로 변경 후 새로고침">🔕 알림 차단됨 (자물쇠→알림→허용)</span> ' + raw;
           return;
         }
-        el.innerHTML = '<button id="permBtn" class="btn btn-amber btn-xs">🔔 알림 켜기</button>';
+        el.innerHTML = '<button id="permBtn" class="btn btn-amber btn-xs">🔔 알림 켜기</button> ' + raw;
         var pb = document.getElementById('permBtn');
         if (pb) {
           pb.addEventListener('click', function () {
@@ -998,68 +1011,113 @@ app.get('/settings', requireAuth, (req, res) => {
       <div class="card-title">🔔 알림 리허설</div>
       <div class="muted small" style="margin-bottom:12px;">
         실제 알림 경로(브라우저 알림 + 텔레그램)를 그대로 사용해 테스트 알림 1건을 발송합니다.
+        제목·본문·클릭 시 이동 경로는 서버의 알림 빌더가 실제 감지와 똑같이 만듭니다.<br>
         조건 일치 수·오늘 보낸 알림 카운트·감시 스냅샷(state)에는 반영되지 않습니다.
       </div>
-      <button id="testBtn" class="btn btn-green">테스트 알림 보내기</button>
+
+      <div class="permstate">
+        <div class="permstate-row">
+          <span class="permstate-k">Notification.permission</span>
+          <code id="permRaw" class="permraw permraw-lg">확인 중…</code>
+          <span id="permHint" class="muted small"></span>
+        </div>
+        <div class="permstate-row">
+          <span class="permstate-k">텔레그램 설정</span>
+          <code class="permraw permraw-lg">${isTelegramConfigured() ? 'configured' : 'unset'}</code>
+          <span class="muted small">${isTelegramConfigured()
+            ? '탭을 닫아도 이 채널로 알림이 옵니다.'
+            : 'TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 미설정 — 콘솔 출력만 됩니다.'}</span>
+        </div>
+        <div id="permAction" style="margin-top:8px;"></div>
+      </div>
+
+      <button id="testBtn" class="btn btn-green">🔔 테스트 알림 보내기</button>
+      <div id="testResult" class="small check-result"></div>
     </div>
+
+    ${notifyLogSection()}
 
     <script>
       const form = document.getElementById('settingsForm');
       const msg = document.getElementById('saveMsg');
 
-      // ---- 공용: 브라우저 알림 + 토스트 ----
-      function showBrowserNotification(opts) {
-        if (!('Notification' in window)) return false;
-        if (Notification.permission !== 'granted') return false;
-        try {
-          var n = new Notification(opts.title, { body: opts.body || '', icon: '/favicon.ico' });
-          n.onclick = function (e) {
-            e.preventDefault();
-            if (opts.link) window.open(opts.link, '_blank', 'noopener');
-            window.focus();
-            n.close();
-          };
-          return true;
-        } catch (_) { return false; }
+      // ---- 브라우저 알림 / 토스트 ----
+      // 실제 구현은 pageShell 의 saessak 하나뿐이다 (대시보드와 완전히 공유).
+      function showBrowserNotification(opts) { return saessak.fireNotification(opts) === 'sent'; }
+      function toast(m) { return saessak.toast(m); }
+
+      // ---- 알림 권한 상태 (원값 그대로 노출) ----
+      var PERM_HINT = {
+        granted: '이 브라우저에서 알림을 띄울 수 있습니다.',
+        denied: '차단됨 — 주소창 자물쇠 → 알림 → 허용으로 바꾼 뒤 새로고침하세요.',
+        default: '아직 허용/차단을 고르지 않았습니다.',
+        unsupported: '이 브라우저는 Notification API 를 지원하지 않습니다.',
+      };
+      function renderPerm() {
+        var perm = saessak.permission();
+        var raw = document.getElementById('permRaw');
+        var hint = document.getElementById('permHint');
+        var act = document.getElementById('permAction');
+        if (raw) raw.textContent = perm;
+        if (hint) hint.textContent = PERM_HINT[perm] || '';
+        if (!act) return;
+        act.innerHTML = perm === 'default'
+          ? '<button id="permBtn" class="btn btn-amber btn-xs">🔔 알림 권한 요청</button>'
+          : '';
+        var pb = document.getElementById('permBtn');
+        if (pb) {
+          pb.addEventListener('click', function () {
+            Notification.requestPermission().then(function () { renderPerm(); });
+          });
+        }
       }
-      function toast(m) {
-        var t = document.getElementById('toast');
-        if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; document.body.appendChild(t); }
-        t.textContent = m;
-        t.classList.add('show');
-        clearTimeout(t._timer);
-        t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
-      }
+      renderPerm();
 
       // ---- 알림 리허설 버튼 ----
+      // 서버가 실제 감지와 동일한 로그 엔트리를 만들고, 같은 notifyPayload() 로
+      // 제목·본문·링크를 뽑아 준다. 클라이언트는 그걸 그대로 실제 발사 함수에 넘긴다
+      // (여기서 문자열을 다시 조립하면 '실제와 같은지'를 검증할 수 없다).
       var testBtn = document.getElementById('testBtn');
+      var testOut = document.getElementById('testResult');
+      function setTestResult(text, kind) {
+        if (!testOut) return;
+        testOut.textContent = text;
+        testOut.className = 'small check-result check-' + kind;
+      }
       if (testBtn) {
         testBtn.addEventListener('click', async function () {
           testBtn.disabled = true;
           var orig = testBtn.textContent;
           testBtn.textContent = '발송 중…';
+          setTestResult('', 'ok');
           try {
             var r = await fetch('/api/test-alert', { method: 'POST' });
             var d = await r.json();
-            if (d.ok) {
-              var c = d.card || {};
-              var meta = [c.type, (c.regions || []).join(','), (c.levels || []).join(',')]
-                .filter(Boolean).join(' · ');
-              var label = (c.institution ? '[' + c.institution + '] ' : '') + (c.title || '');
-              var browserOk = showBrowserNotification({
-                title: '🔴 [모집 시작] ' + label,
-                body: meta,
-                link: c.link,
-              });
+            if (d.ok && d.notification) {
+              var fire = saessak.fireNotification(d.notification);
+              var browserText = fire === 'sent' ? '브라우저 O'
+                : fire === 'denied' ? '브라우저 X(권한 차단)'
+                : fire === 'default' ? '브라우저 X(권한 미허용)'
+                : fire === 'unsupported' ? '브라우저 X(미지원)'
+                : '브라우저 X(오류)';
               var tgText = d.telegram === 'sent' ? '텔레그램 O'
-                : d.telegram === 'failed' ? '텔레그램 X(실패)'
+                : d.telegram === 'failed' ? '텔레그램 X(발송 실패)'
                 : '텔레그램 미설정';
-              toast('발송됨: 브라우저 ' + (browserOk ? 'O' : 'X') + ' / ' + tgText);
+              var okAny = fire === 'sent' || d.telegram === 'sent';
+              setTestResult(
+                browserText + ' / ' + tgText + ' — 발송 제목: ' + d.notification.title,
+                okAny ? 'ok' : 'err'
+              );
+              toast(browserText + ' / ' + tgText);
+              renderPerm();
+              // 로그에 방금 기록이 남았으므로 표를 갱신해서 바로 확인할 수 있게 한다.
+              setTimeout(function () { location.reload(); }, 2500);
             } else {
-              toast('발송 실패: ' + (d.error || '알 수 없음'));
+              setTestResult('발송 실패: ' + (d.error || '알 수 없음'), 'err');
+              toast('발송 실패');
             }
           } catch (e) {
-            toast('요청 오류: ' + e.message);
+            setTestResult('요청 오류: ' + e.message, 'err');
           } finally {
             testBtn.disabled = false;
             testBtn.textContent = orig;
@@ -1355,6 +1413,28 @@ app.post('/api/test-alert', requireAuth, async (req, res) => {
   }
 });
 
+// ---- 알림 피드 (공개, 캐시된 로그만) ----
+// 브라우저 알림의 '실제 발사 경로'. 대시보드가 이 피드를 주기적으로 읽어
+// 마지막으로 본 시각 이후의 항목을 알림으로 띄운다. 테스트 알림도 같은 로그에
+// 같은 모양(kind:'test')으로 들어가므로 이 경로를 그대로 탄다.
+app.get('/api/notifications', (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const items = storage
+      .getLog()
+      .slice(0, limit)
+      .map((l) => ({
+        at: l.at,
+        kind: l.kind,
+        delivery: deliveryLabelKey(l),
+        ...notifyPayload(l),
+      }));
+    res.json({ ok: true, now: new Date().toISOString(), items });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ---- 읽기 전용 요약 API (공개, 캐시된 데이터만 — 스크래핑 유발 안 함) ----
 app.get('/api/summary', (req, res) => {
   try {
@@ -1507,6 +1587,81 @@ function instLabel(institution, title) {
   const inst = String(institution || '').trim();
   const t = String(title || '');
   return inst ? `[${inst}] ${t}` : t;
+}
+
+// ---- 알림 발송 결과 표시 ----
+// delivery 필드가 없던 시절의 기록은 sent 로 되짚는다. 그때는 '꺼둠'과 '실패'를
+// 구분해 저장하지 않았으므로, 실패라고 단정하지 않고 '기록 없음'으로 남긴다.
+function deliveryLabelKey(l) {
+  if (l && l.delivery) return l.delivery;
+  if (l && l.sent) return 'sent';
+  return 'unknown';
+}
+const DELIVERY_LABEL = {
+  sent: { text: '✅ 성공', cls: 'dl-ok', title: '텔레그램 발송 성공' },
+  failed: { text: '❌ 실패', cls: 'dl-bad', title: '발송을 시도했으나 실패 (토큰·네트워크·차단)' },
+  off: { text: '⏸ 꺼둠', cls: 'dl-off', title: '이 알림 유형이 설정에서 꺼져 있어 발송하지 않음' },
+  unset: { text: '⚙ 미설정', cls: 'dl-off', title: '텔레그램 토큰/챗ID 미설정 — 콘솔에만 출력' },
+  none: { text: '· 기록만', cls: 'dl-off', title: '발송 대상이 아닌 기록' },
+  unknown: { text: '? 기록 없음', cls: 'dl-off', title: '구버전 로그 — 발송 결과를 저장하지 않던 시절의 기록' },
+};
+const KIND_LABEL = {
+  start: '모집 시작 전환',
+  new: '신규 등록',
+  reminder: '오픈 리마인더',
+  change: '정보 변경',
+  'new-label': '새 분류 발견',
+  test: '테스트 발송',
+};
+
+// 설정 화면의 알림 로그 표 (최근 20건: 시각 · 프로그램명 · 사유 · 성공/실패)
+function notifyLogSection() {
+  const log = storage.getLog().slice(0, 20);
+  const today = new Date().toISOString().slice(0, 10);
+  const todayAll = storage.getLog().filter((l) => (l.at || '').slice(0, 10) === today);
+  const todaySent = todayAll.filter((l) => deliveryLabelKey(l) === 'sent').length;
+  const todayFailed = todayAll.filter((l) => deliveryLabelKey(l) === 'failed').length;
+  const todayOff = todayAll.filter((l) => deliveryLabelKey(l) === 'off').length;
+
+  // "오늘 0건"이 감지가 없어서인지 발송이 막혀서인지 한 줄로 구분해 준다.
+  let summary;
+  if (!todayAll.length) {
+    summary = '오늘 감지된 항목이 <b>0건</b> 입니다 — 발송 실패가 아니라 조건에 맞는 변화가 없었습니다.';
+  } else {
+    const bits = [`오늘 감지 <b>${todayAll.length}건</b>`, `성공 <b>${todaySent}건</b>`];
+    if (todayFailed) bits.push(`<b class="dl-bad-t">실패 ${todayFailed}건</b>`);
+    if (todayOff) bits.push(`꺼둠 ${todayOff}건`);
+    summary = bits.join(' · ');
+  }
+
+  const rows = log
+    .map((l) => {
+      const key = deliveryLabelKey(l);
+      const d = DELIVERY_LABEL[key] || DELIVERY_LABEL.unknown;
+      const when = fmtKstDateTime(l.at) || escapeHtml(l.at || '');
+      const kind = KIND_LABEL[l.kind] || l.kind || '기타';
+      const extra = l.changes ? ` <span class="muted small">(${escapeHtml(l.changes)})</span>` : '';
+      return `<div class="nlog-row">
+        <span class="nlog-time">${escapeHtml(when)}</span>
+        <span class="nlog-title">${escapeHtml(instLabel(l.institution, l.title))}${extra}</span>
+        <span class="nlog-kind">${escapeHtml(kind)}</span>
+        <span class="nlog-res ${d.cls}" title="${escapeHtml(d.title)}">${escapeHtml(d.text)}</span>
+      </div>`;
+    })
+    .join('');
+
+  return `
+    <div class="card">
+      <div class="card-title">📜 알림 로그 <span class="muted small">(최근 20건)</span></div>
+      <div class="muted small" style="margin-bottom:10px;">${summary}</div>
+      <div class="nlog-head">
+        <span class="nlog-time">시각(KST)</span>
+        <span class="nlog-title">프로그램</span>
+        <span class="nlog-kind">사유</span>
+        <span class="nlog-res">발송</span>
+      </div>
+      <div class="nlog">${rows || '<div class="muted small" style="padding:10px 0;">기록된 알림이 없습니다.</div>'}</div>
+    </div>`;
 }
 
 // 상대시각 "N분 전" (초 단위 제거)
@@ -2404,6 +2559,37 @@ function pageShell(title, body) {
   .check-wait { color:#2b6cb0; font-weight:600; }
   .check-lock { color:var(--text-secondary); font-weight:600; }
   .check-err  { color:#a33; font-weight:600; }
+  /* ---- 알림 권한 상태 / 알림 로그 ---- */
+  .permraw { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+    background:var(--surface-1); border:1px solid var(--line); color:var(--text-secondary);
+    padding:1px 6px; border-radius:6px; }
+  .permraw-lg { font-size:12px; padding:3px 9px; font-weight:700; }
+  .permstate { background:var(--surface-1); border:1px solid var(--line); border-radius:11px;
+    padding:11px 13px; margin-bottom:13px; }
+  .permstate-row { display:flex; align-items:center; gap:9px; flex-wrap:wrap; padding:3px 0; }
+  .permstate-k { font-size:12px; font-weight:700; color:var(--text-secondary); min-width:150px; }
+  .nlog-head, .nlog-row { display:grid; grid-template-columns: 108px 1fr 96px 84px; gap:9px;
+    align-items:center; padding:7px 0; }
+  .nlog-head { font-size:11px; font-weight:800; color:var(--text-muted);
+    border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .nlog-row { border-top:1px solid var(--line); font-size:13px; }
+  .nlog-row:first-child { border-top:none; }
+  .nlog-time { color:var(--text-secondary); font-size:12px; white-space:nowrap; }
+  .nlog-title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .nlog-kind { font-size:12px; color:var(--text-secondary); white-space:nowrap; }
+  .nlog-res { font-size:12px; font-weight:700; white-space:nowrap; }
+  .dl-ok  { color:var(--green-d); }
+  .dl-bad { color:#d9534f; }
+  .dl-off { color:var(--text-muted); }
+  .dl-bad-t { color:#d9534f; }
+  @media (max-width:560px){
+    .nlog-head { display:none; }
+    .nlog-row { grid-template-columns: 1fr auto; row-gap:2px; }
+    .nlog-title { grid-column:1 / -1; order:1; }
+    .nlog-time { order:2; }
+    .nlog-kind { order:3; text-align:right; }
+    .nlog-res { grid-column:2; order:4; text-align:right; }
+  }
   @media (max-width:560px){
     .grid { grid-template-columns: 1fr; }
     .stat-num { font-size:26px; }
@@ -2411,6 +2597,52 @@ function pageShell(title, body) {
 </style>
 </head>
 <body>
+  <script>
+    // ============ 공용 알림 유틸 ============
+    // 본문보다 먼저 정의한다 — 각 화면의 인라인 스크립트가 파싱 즉시 이걸 부른다.
+    // 브라우저 알림을 실제로 띄우는 함수는 이 하나뿐이다. 대시보드의 자동 발사도,
+    // 설정 화면의 테스트 버튼도 전부 saessak.fireNotification 을 거친다
+    // (테스트가 따로 만든 경로를 타면 검증이 되지 않으므로).
+    window.saessak = (function () {
+      function permission() {
+        if (!('Notification' in window)) return 'unsupported';
+        return Notification.permission; // 'granted' | 'denied' | 'default'
+      }
+
+      // p: { title, body, link } — 서버 notifyPayload() 가 만든 그대로
+      // 반환: 'sent' | 'unsupported' | 'denied' | 'default' | 'error'
+      function fireNotification(p) {
+        if (!('Notification' in window)) return 'unsupported';
+        if (Notification.permission !== 'granted') return Notification.permission;
+        try {
+          var n = new Notification(p.title, { body: p.body || '', icon: '/favicon.ico' });
+          n.onclick = function (e) {
+            e.preventDefault();
+            if (p.link) window.open(p.link, '_blank', 'noopener');
+            window.focus();
+            n.close();
+          };
+          return 'sent';
+        } catch (_) { return 'error'; }
+      }
+
+      function toast(m) {
+        var t = document.getElementById('toast');
+        if (!t) {
+          t = document.createElement('div');
+          t.id = 'toast';
+          t.className = 'toast';
+          document.body.appendChild(t);
+        }
+        t.textContent = m;
+        t.classList.add('show');
+        clearTimeout(t._timer);
+        t._timer = setTimeout(function () { t.classList.remove('show'); }, 3500);
+      }
+
+      return { fireNotification: fireNotification, toast: toast, permission: permission };
+    })();
+  </script>
   <div class="wrap">${body}</div>
 </body>
 </html>`;

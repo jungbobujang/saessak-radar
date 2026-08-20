@@ -146,6 +146,45 @@ function isTelegramConfigured() {
   return !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
 }
 
+// ---- 발송 결과 구분 ----
+// sent(boolean) 하나로는 "알림 유형을 꺼 뒀다 / 텔레그램 미설정 / 진짜 실패" 가
+// 전부 false 로 뭉개진다. 로그에서 "오늘 0건"의 원인을 가르려면 이 구분이 필요하다.
+//   sent   : 발송 성공
+//   failed : 보내려 했는데 실패 (토큰·네트워크·차단)
+//   off    : 해당 알림 유형이 설정에서 꺼져 있음 (정상 동작)
+//   unset  : 텔레그램 미설정 (콘솔에만 출력)
+//   none   : 애초에 발송 대상이 아닌 기록 (정보 변경 등)
+function deliveryOf(wantSend, sent) {
+  if (sent) return 'sent'; // 성공은 다른 무엇보다 우선한다
+  if (!wantSend) return 'off';
+  return isTelegramConfigured() ? 'failed' : 'unset';
+}
+
+// ---- 브라우저 알림 페이로드 (단일 빌더) ----
+// 감지 로그 1건 → { title, body, link }. 실제 감지 알림과 테스트 알림이
+// '똑같은 형식'이라는 걸 코드로 보장하려고, 양쪽 모두 이 함수 하나만 거친다.
+// (텔레그램 buildMessage 의 머리말·라벨 규칙을 그대로 따른다)
+const NOTIF_HEAD = {
+  start: '🔴 [모집 시작]',
+  new: '🟡 [새 프로그램]',
+  reminder: '🔔 [오픈 리마인더]',
+  change: '📅 [정보 변경]',
+  'new-label': '🆕 [새 분류]',
+  test: '🔴 [모집 시작]', // 테스트는 '모집 시작' 알림과 완전히 같은 모양으로 나간다
+};
+
+function notifyPayload(entry) {
+  const e = entry || {};
+  const head = NOTIF_HEAD[e.kind] || NOTIF_HEAD.new;
+  const label = withInst(e.institution, e.title);
+  const body = [e.status, e.changes].filter((x) => x && String(x).length).join(' · ');
+  return {
+    title: `${head} ${label}`.trim(),
+    body,
+    link: e.link || '',
+  };
+}
+
 // ---- 텔레그램 발송 ----
 // opts.link 이 있으면 본문 링크는 그대로 두고, 인라인 키보드 버튼("🔗 신청 페이지 열기")을 함께 붙인다.
 async function sendTelegram(html, opts = {}) {
@@ -277,7 +316,7 @@ async function checkOnce({ reason } = {}) {
         freshUnknown.map((t) => '• ' + escapeHtml(t)).join('\n') +
         '\n\n알 수 없는 교육대상 분류입니다. <b>미분류</b>로 수집 중이니 ' +
         '레이더 매핑/설정 확인이 필요할 수 있습니다.';
-      await sendTelegram(html);
+      const labelSent = await sendTelegram(html);
       for (const t of freshUnknown) {
         storage.appendLog({
           at: new Date().toISOString(),
@@ -286,7 +325,8 @@ async function checkOnce({ reason } = {}) {
           institution: '',
           status: '',
           link: '',
-          sent: true,
+          sent: labelSent,
+          delivery: deliveryOf(true, labelSent),
         });
       }
       console.log('[watcher] 새 분류 발견:', freshUnknown.join(', '));
@@ -339,6 +379,7 @@ async function checkOnce({ reason } = {}) {
       status: n.card.status,
       link: n.card.link,
       sent,
+      delivery: deliveryOf(wantSend, sent),
     });
     console.log(
       `[watcher] 감지(${n.kind}): ${n.card.title} [${n.card.status}] send=${wantSend} sent=${sent}`
@@ -382,18 +423,10 @@ async function checkOnce({ reason } = {}) {
           const desc = changes
             .map((c) => `${c.field} ${c.from || '-'}→${c.to || '-'}`)
             .join(', ');
-          storage.appendLog({
-            at: now,
-            kind: 'change',
-            title,
-            institution,
-            status: newD.status,
-            link,
-            sent: false,
-            changes: desc,
-          });
-          console.log(`[watcher] 정보 변경: ${withInst(institution, title)} — ${desc}`);
           // 신청 시작 일시 변경 → 텔레그램 알림 + 리마인더 재예약
+          // (그 외의 변경은 기록만 남기고 발송하지 않는다 → delivery 'none')
+          let chgSent = false;
+          let chgDelivery = 'none';
           if ((oldD.applyStartAt || '') !== (newD.applyStartAt || '')) {
             const html =
               `📅 <b>[신청일정 변경]</b>\n` +
@@ -401,12 +434,25 @@ async function checkOnce({ reason } = {}) {
               `신청 시작: ${escapeHtml(fmtKstDateTime(oldD.applyStartAt) || '미공지')} → ` +
               `<b>${escapeHtml(fmtKstDateTime(newD.applyStartAt) || '미공지')}</b>\n` +
               `${escapeHtml(link)}`;
-            await sendTelegram(html, { link });
+            chgSent = await sendTelegram(html, { link });
+            chgDelivery = deliveryOf(true, chgSent);
             const rem = storage.getReminders();
             delete rem[id + ':pre_day'];
             delete rem[id + ':pre_10min'];
             storage.saveReminders(rem);
           }
+          storage.appendLog({
+            at: now,
+            kind: 'change',
+            title,
+            institution,
+            status: newD.status,
+            link,
+            sent: chgSent,
+            delivery: chgDelivery,
+            changes: desc,
+          });
+          console.log(`[watcher] 정보 변경: ${withInst(institution, title)} — ${desc}`);
         }
       }
       details[id] = newD;
@@ -488,22 +534,26 @@ async function sendTestAlert() {
     pendingClasses: 7,
   };
 
-  const tgConfigured = isTelegramConfigured();
   const html = buildMessage('start', card);
   const sent = await sendTelegram(html, { link: card.link });
-  const telegram = !tgConfigured ? 'unset' : sent ? 'sent' : 'failed';
+  const telegram = deliveryOf(true, sent);
 
-  storage.appendLog({
+  // 실제 감지와 동일한 형태의 로그 엔트리를 만들고, 그 엔트리를 그대로
+  // notifyPayload 에 태워 돌려준다 → 브라우저 알림도 실제 경로와 같은 빌더를 탄다.
+  const entry = {
     at: new Date().toISOString(),
     kind: 'test',
     title: card.title,
+    institution: card.institution || '',
     status: card.status,
     link: card.link,
     sent,
-  });
+    delivery: telegram,
+  };
+  storage.appendLog(entry);
   console.log(`[watcher] 테스트 알림 발송 telegram=${telegram}`);
 
-  return { ok: true, telegram, card };
+  return { ok: true, telegram, card, entry, notification: notifyPayload(entry) };
 }
 
 // ---- 오픈 리마인더 (사이트 요청 없음, 1분 간격 경량 체크) ----
@@ -575,6 +625,7 @@ async function sendReminder(kind, id, d, st) {
     status: '모집 예정',
     link,
     sent: ok,
+    delivery: deliveryOf(true, ok),
   });
   console.log(`[watcher] 리마인더(${kind}): ${label} sent=${ok}`);
   return ok;
@@ -590,4 +641,6 @@ module.exports = {
   ddayKst,
   sendTestAlert,
   isTelegramConfigured,
+  notifyPayload,
+  deliveryOf,
 };
