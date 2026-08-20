@@ -1420,18 +1420,32 @@ const PRACTICE_ADDRESSES = [
 // 문제 생성 요소 — 연습 시작마다 랜덤 조합된다.
 const PRACTICE_QUIZ = {
   sessions: [8, 12, 16],
+  // 모집 학년 범위는 초등학교로만 뽑는다 (중·고 범위는 문제로 내지 않는다).
   ranges: [
     { label: '초등학교 1~6학년 전체', row: 'elem' },
     { label: '초등학교 1~4학년', row: 'elem' },
     { label: '초등학교 5~6학년', row: 'elem' },
     { label: '초등학교 3~6학년', row: 'elem' },
     { label: '초등학교 1~2학년', row: 'elem' },
-    { label: '중학교 1~3학년', row: 'mid' },
   ],
+  // 체크박스 행은 실제 폼과 똑같이 3줄을 그대로 둔다. 중·고 행은 늘 비활성이지만,
+  // 실전에서 그 줄을 건너뛰는 눈동자 움직임까지 연습 대상이라 지우지 않는다.
   gradeRows: [
     { key: 'elem', label: '초등학교 1~6학년' },
     { key: 'mid', label: '중학교 1~3학년' },
     { key: 'high', label: '고등학교 1~3학년' },
+  ],
+  // 교육대상 — 실제 폼에 있는 7개를 그대로 둔다. 하나도 지우거나 잠그지 않는다.
+  // 우리 학교가 신청할 수 있는 건 일반형·배려형(이주배경)·교복우 셋뿐이고,
+  // 나머지 4개는 화면에는 똑같이 보이되 고르면 오답이다 (판정에서만 갈린다).
+  // 라벨은 classify.js 의 short 표기를 그대로 써서 대시보드 표기와 어긋나지 않게 한다.
+  eduTargets: [
+    ...classify.CATEGORIES.map((c) => ({
+      key: c.key,
+      label: c.short,
+      ok: c.key === 'general' || c.key === 'migrant' || c.key === 'welfare',
+    })),
+    { key: 'unknown', label: classify.UNCLASSIFIED, ok: false },
   ],
   opTimes: [
     '비교과 자유학기제',
@@ -1559,19 +1573,27 @@ app.get('/practice', requireAuth, (req, res) => {
         <div class="pf-grades" id="pfGrades"></div>
       </section>
 
-      <!-- 5~6) 신청 인원 / 총 교육 차시 -->
+      <!-- 5) 교육대상 — 7개 전부 선택 가능. 맞고 틀림은 채점에서만 갈린다. -->
+      <section class="pf-sec">
+        <div class="pf-legend">5. 교육대상 <b class="pf-req">*</b>
+          <span class="pf-tag">해당하는 것을 고르세요</span>
+        </div>
+        <div class="pf-edus" id="pfEdus"></div>
+      </section>
+
+      <!-- 6~7) 신청 인원 / 총 교육 차시 -->
       <section class="pf-sec">
         <div class="pf-grid2">
-          <label class="pf-field"><span class="pf-label">5. 신청 인원 <b class="pf-req">*</b></span>
+          <label class="pf-field"><span class="pf-label">6. 신청 인원 <b class="pf-req">*</b></span>
             <input class="pf-in" id="pfCount" type="number" min="1" max="99" inputmode="numeric" placeholder="명"></label>
-          <label class="pf-field"><span class="pf-label">6. 총 교육 차시 <b class="pf-req">*</b></span>
+          <label class="pf-field"><span class="pf-label">7. 총 교육 차시 <b class="pf-req">*</b></span>
             <input class="pf-in" id="pfSessions" type="number" min="1" max="99" inputmode="numeric" placeholder="차시"></label>
         </div>
       </section>
 
-      <!-- 7) 교육 시작일 / 종료일 -->
+      <!-- 8) 교육 시작일 / 종료일 -->
       <section class="pf-sec">
-        <div class="pf-legend">7. 교육 시작일 / 종료일 <b class="pf-req">*</b></div>
+        <div class="pf-legend">8. 교육 시작일 / 종료일 <b class="pf-req">*</b></div>
         <div class="pf-datewrap">
           <span class="pf-label">시작</span>
           <div class="pf-daterow">
@@ -1590,24 +1612,24 @@ app.get('/practice', requireAuth, (req, res) => {
         </div>
       </section>
 
-      <!-- 8) 운영시간 -->
+      <!-- 9) 운영시간 -->
       <section class="pf-sec">
-        <div class="pf-legend">8. 운영시간 <b class="pf-req">*</b></div>
+        <div class="pf-legend">9. 운영시간 <b class="pf-req">*</b></div>
         <select class="pf-in" id="pfOpTime"></select>
       </section>
 
-      <!-- 9) 요청사항 -->
+      <!-- 10) 요청사항 -->
       <section class="pf-sec">
-        <div class="pf-legend">9. 요청사항 <span class="pf-tag">선택 — 비워도 통과</span></div>
+        <div class="pf-legend">10. 요청사항 <span class="pf-tag">선택 — 비워도 통과</span></div>
         <textarea class="pf-in pf-ta" id="pfNote" rows="4" placeholder="운영기관에 전달할 요청사항"></textarea>
         <button type="button" class="btn btn-sm btn-ghost" id="pfBoiler" style="margin-top:7px;">
           📋 정형문구 붙여넣기
         </button>
       </section>
 
-      <!-- 10) 약관 동의 -->
+      <!-- 11) 약관 동의 -->
       <section class="pf-sec">
-        <div class="pf-legend">10. 약관 동의 <b class="pf-req">*</b></div>
+        <div class="pf-legend">11. 약관 동의 <b class="pf-req">*</b></div>
         <label class="pf-agree pf-agree-all">
           <input type="checkbox" id="pfAgreeAll"><span><b>전체 동의</b></span>
         </label>
@@ -1685,6 +1707,7 @@ app.get('/practice', requireAuth, (req, res) => {
         addrBtn: document.getElementById('pfAddrBtn'),
         target: document.getElementById('pfTarget'),
         grades: document.getElementById('pfGrades'),
+        edus: document.getElementById('pfEdus'),
         count: document.getElementById('pfCount'),
         sessions: document.getElementById('pfSessions'),
         startDate: document.getElementById('pfStartDate'),
@@ -1894,6 +1917,23 @@ app.get('/practice', requireAuth, (req, res) => {
           el.grades.appendChild(lab);
         });
 
+        // 교육대상 — 7개를 전부 그대로, 전부 선택 가능하게 그린다.
+        // 신청 가능 대상(학년)과 달리 잠그지 않는다. 실전 폼이 그렇기 때문이고,
+        // 고를 수는 있되 틀린 걸 고르면 채점에서 걸러지는 게 이 연습의 요점이다.
+        el.edus.innerHTML = '';
+        QUIZ.eduTargets.forEach(function (t) {
+          var lab = document.createElement('label');
+          lab.className = 'pf-edu';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.className = 'pf-educb';
+          cb.value = t.key;
+          var sp = document.createElement('span');
+          sp.textContent = t.label;
+          lab.appendChild(cb); lab.appendChild(sp);
+          el.edus.appendChild(lab);
+        });
+
         // 값 비우기
         el.addr.value = ''; el.addrDetail.value = '';
         el.target.value = '';
@@ -1919,6 +1959,7 @@ app.get('/practice', requireAuth, (req, res) => {
         if (i === 1) {
           return !!el.target.value &&
             el.grades.querySelectorAll('.pf-gradecb:checked').length > 0 &&
+            el.edus.querySelectorAll('.pf-educb:checked').length > 0 &&
             el.count.value !== '' && el.sessions.value !== '';
         }
         if (i === 2) {
@@ -2035,6 +2076,29 @@ app.get('/practice', requireAuth, (req, res) => {
               fail(el.grades, '모집 범위 밖의 학년을 선택했습니다');
               break;
             }
+          }
+        }
+        // 교육대상 — 우리 학교가 신청할 수 있는 셋 중 하나 이상, 그 밖의 것은 하나도 없어야 한다
+        var eduChecked = el.edus.querySelectorAll('.pf-educb:checked');
+        if (!eduChecked.length) {
+          fail(el.edus, '교육대상을 하나도 고르지 않았습니다');
+        } else {
+          var okKeys = {};
+          QUIZ.eduTargets.forEach(function (t) { if (t.ok) okKeys[t.key] = true; });
+          var wrong = [];
+          var hasOk = false;
+          for (var e = 0; e < eduChecked.length; e++) {
+            if (okKeys[eduChecked[e].value]) hasOk = true;
+            else wrong.push(eduChecked[e].value);
+          }
+          if (wrong.length) {
+            var names = QUIZ.eduTargets
+              .filter(function (t) { return wrong.indexOf(t.key) >= 0; })
+              .map(function (t) { return t.label; })
+              .join(', ');
+            fail(el.edus, '해당 학교가 신청할 수 없는 대상입니다 (' + names + ')');
+          } else if (!hasOk) {
+            fail(el.edus, '해당 학교가 신청할 수 없는 대상입니다');
           }
         }
         if (Number(el.count.value) !== quiz.cap) {
@@ -3668,6 +3732,13 @@ function pageShell(title, body) {
   .pf-grade input { accent-color:var(--green); width:16px; height:16px; }
   .pf-grade.is-off { opacity:.45; cursor:not-allowed; }
   .pf-grade.is-off input { cursor:not-allowed; }
+  /* 교육대상 7개 — 전부 활성. 잠긴 항목이 없으므로 is-off 대응 규칙도 두지 않는다. */
+  .pf-edus { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+  .pf-edu { display:flex; align-items:center; gap:8px; padding:9px 11px; border-radius:10px;
+    background:var(--surface-1); border:1px solid var(--line); font-size:13px; cursor:pointer;
+    min-width:0; }
+  .pf-edu input { accent-color:var(--green); width:16px; height:16px; flex-shrink:0; }
+  .pf-edu span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .pf-datewrap { display:flex; align-items:center; gap:10px; }
   .pf-datewrap .pf-label { min-width:32px; }
   .pf-daterow { display:flex; gap:7px; flex:1; min-width:0; }
@@ -3756,6 +3827,7 @@ function pageShell(title, body) {
     .pr-recdq { order:4; grid-column:2; text-align:right; }
     /* 폼 */
     .pf-grid2 { grid-template-columns:1fr; }
+    .pf-edus { grid-template-columns:1fr; }
     .pf-info-list { grid-template-columns:88px 1fr; }
     .pf-datewrap { flex-direction:column; align-items:stretch; gap:5px; }
     .pf-datewrap .pf-label { min-width:0; }
