@@ -512,14 +512,19 @@ app.get('/', (req, res) => {
       ${navTabs('home')}
     </div>
 
-    <div class="statusbar">
+    <div class="statusbar" id="statusbar">
       <span class="sdot ${dotClass}"></span>
       <span class="sb-main">${escapeHtml(okText)}</span>
       <span class="sb-sep">·</span><span>${escapeHtml(rel)} 확인</span>
-      <span class="sb-sep">·</span><span>${currentInterval || s.intervalMinutes}분 간격</span>
-      <span class="sb-sep">·</span><span>일치 ${runtime.lastMatchCount}건</span>
       <span class="sb-sep">·</span><span>오늘 알림 ${todayCount}건</span>
-      <span class="sb-sep">·</span><span id="permInline" class="sb-perm"></span>
+      <!-- 좁은 화면에서는 아래 묶음을 접는다 (▾ 로 펼침). 넓은 화면에서는 늘 보인다. -->
+      <span class="sb-extra">
+        <span class="sb-sep">·</span><span>${currentInterval || s.intervalMinutes}분 간격</span>
+        <span class="sb-sep">·</span><span>일치 ${runtime.lastMatchCount}건</span>
+        <span class="sb-sep">·</span><span id="permInline" class="sb-perm"></span>
+      </span>
+      <button type="button" class="sb-more" id="sbMore" aria-expanded="false"
+        aria-controls="statusbar" aria-label="상태 자세히 보기">▾</button>
     </div>
     <div class="condbar">
       <span class="condlabel">감시 조건</span>
@@ -535,6 +540,18 @@ app.get('/', (req, res) => {
     </div>` : ''}
 
     <script>
+      // ---- 상태바 접기/펼치기 (좁은 화면 전용) ----
+      // 항목이 6개라 폰에서는 3줄까지 흐른다. 핵심 3개만 두고 나머지는 ▾ 로 펼친다.
+      const sbMore = document.getElementById('sbMore');
+      if (sbMore) {
+        sbMore.addEventListener('click', () => {
+          const bar = document.getElementById('statusbar');
+          const open = bar.classList.toggle('sb-open');
+          sbMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+          sbMore.textContent = open ? '▴' : '▾';
+        });
+      }
+
       // 제목을 누르면 새로고침한다. 이미 대시보드라 '/' 로 이동시켜도 되지만,
       // 그러면 브라우저가 캐시된 화면을 그대로 보여 줄 수 있어 reload 로 최신을 받는다.
       // 새 탭/가운데 클릭·수정키 조합은 가로채지 않는다 (href 가 그대로 살아 있다).
@@ -3563,10 +3580,13 @@ function renderPlanner() {
         <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">${live.length}</span></div>
         <div class="plan-tools">
           <span class="plan-toolslabel">정렬</span>
-          <button type="button" class="fchip on" data-rs="many">잔여 많은 순</button>
-          <button type="button" class="fchip" data-rs="few">잔여 적은 순 (경쟁 치열)</button>
+          <button type="button" class="fchip on" data-rs="many" title="잔여 많은 순"
+            ><span class="fc-full">잔여 많은 순</span><span class="fc-short">많은 순</span></button>
+          <button type="button" class="fchip" data-rs="few" title="잔여 적은 순 (경쟁 치열)"
+            ><span class="fc-full">잔여 적은 순 (경쟁 치열)</span><span class="fc-short">적은 순</span></button>
           <span class="plan-toolssep"></span>
-          <button type="button" class="fchip" data-rf="open" aria-pressed="false">잔여 있는 것만</button>
+          <button type="button" class="fchip" data-rf="open" aria-pressed="false" title="잔여 있는 것만"
+            ><span class="fc-full">잔여 있는 것만</span><span class="fc-short">잔여만</span></button>
         </div>
         <div id="liveRows">${liveRows}</div>
         <div class="muted small plan-empty" id="liveEmpty" hidden>조건에 맞는 프로그램이 없습니다.</div>
@@ -3599,17 +3619,19 @@ function renderPlanner() {
 // ---- 상단 탭 ----
 // active: 'home' | 'practice' | 'settings' | null
 function navTabs(active) {
+  // 아이콘과 글자를 나눠 둔다 — 아주 좁은 화면에서는 CSS 가 글자만 숨겨
+  // 현재 탭만 라벨을 남긴다(무엇을 보고 있는지는 알아야 하므로).
   const tabs = [
-    { key: 'home', href: '/', label: '🌱 대시보드' },
-    { key: 'practice', href: '/practice', label: '🏃 신청 연습' },
-    { key: 'settings', href: '/settings', label: '⚙️ 설정' },
+    { key: 'home', href: '/', icon: '🌱', label: '대시보드' },
+    { key: 'practice', href: '/practice', icon: '🏃', label: '신청 연습' },
+    { key: 'settings', href: '/settings', icon: '⚙️', label: '설정' },
   ];
   return `<nav class="navlinks">${tabs
     .map(
       (t) =>
         `<a class="navlink${t.key === active ? ' on' : ''}" href="${t.href}"${
           t.key === active ? ' aria-current="page"' : ''
-        }>${t.label}</a>`
+        } title="${t.label}"><span class="nav-ico">${t.icon}</span><span class="nav-label">${t.label}</span></a>`
     )
     .join('')}</nav>`;
 }
@@ -3686,10 +3708,13 @@ function pageShell(title, body) {
   [hidden] { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
-    line-height:1.5; }
+    line-height:1.5;
+    /* 한글은 어절 단위로만 끊는다. 단어 중간에서 쪼개지는 것을 전면 금지하고,
+       끊을 자리가 없는 긴 토큰(URL 등)만 예외로 강제 줄바꿈한다. */
+    word-break: keep-all; overflow-wrap: break-word; }
   .wrap { max-width: 780px; margin:0 auto; padding: 18px 16px 60px; }
   .header { display:flex; align-items:center; justify-content:space-between; margin: 8px 0 18px; }
-  .logo { font-size: 22px; font-weight: 800; letter-spacing:-0.02em; }
+  .logo { font-size: 22px; font-weight: 800; letter-spacing:-0.02em; white-space:nowrap; }
   /* 제목은 누르는 자리다 — 대시보드에서는 새로고침, 다른 화면에서는 홈으로.
      글자 색·크기는 그대로 두고(제목처럼 보여야 한다) 누를 수 있다는 것만 알린다. */
   a.logo { color:inherit; text-decoration:none; cursor:pointer;
@@ -3709,15 +3734,12 @@ function pageShell(title, body) {
   .navlink:hover { background:var(--surface-1); }
   /* 상단 탭 묶음 — 좁은 화면에서는 제목 아래로 접힌다 */
   .navlinks { display:flex; align-items:center; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+  .nav-ico { margin-right:4px; }
   .navlink.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); }
   @media (prefers-color-scheme: dark) {
     .navlink.on { background:#17301f; border-color:#2b5c3c; }
   }
-  @media (max-width:420px) {
-    .header { flex-wrap:wrap; gap:9px; }
-    .navlinks { width:100%; justify-content:flex-start; }
-    .navlink { font-size:13px; padding:7px 10px; }
-  }
+
   .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:14px; }
   .card { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; }
   .card-title { font-weight:700; font-size:15px; margin-bottom:9px; }
@@ -3732,6 +3754,9 @@ function pageShell(title, body) {
   .sb-main { font-weight:800; color:var(--ink); }
   .sb-sep { color:var(--line); }
   .sb-perm { display:inline-flex; align-items:center; }
+  .sb-extra { display:contents; }
+  .sb-more { display:none; margin-left:auto; flex:none; background:none; border:none;
+    color:var(--text-muted); font-size:13px; line-height:1; padding:4px 2px; cursor:pointer; }
   .perm-ok { color:var(--green-d); font-weight:700; }
   .perm-bad { color:#d9534f; font-weight:700; cursor:help; }
   .condbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
@@ -3807,7 +3832,7 @@ function pageShell(title, body) {
   .metabit .ti { flex:none; opacity:.75; }
   .metasep { color:var(--text-muted); opacity:.5; }
   /* 교육대상 색칩 — 우리 학교 대상만 진한 색, 나머지는 회색으로 누름 */
-  .tchips { display:inline-flex; flex-wrap:wrap; gap:5px; }
+  .tchips { display:inline-flex; flex-wrap:nowrap; gap:5px; min-width:0; overflow:hidden; }
   .tchip { font-size:11px; font-weight:700; line-height:1.6; padding:1px 8px; border-radius:999px;
     white-space:nowrap; }
   .tc-general { background:var(--tc-general-bg); color:var(--tc-general-fg); }
@@ -3825,7 +3850,7 @@ function pageShell(title, body) {
   .cap-remain { color:var(--green-d); font-weight:800; margin-right:5px; white-space:nowrap; }
   .cap-remain-0 { color:var(--gauge-full); }
   .cap-remain-un { color:var(--text-secondary); }
-  .cap-detail { color:var(--text-muted); }
+  .cap-detail { color:var(--text-muted); white-space:nowrap; }
   .cap-tag { font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;
     margin-right:5px; white-space:nowrap; }
   .cap-tag-over { background:#fdeaea; color:#a33; }
@@ -3835,7 +3860,8 @@ function pageShell(title, body) {
   .plan-toolslabel { font-size:12px; color:var(--text-muted); font-weight:700; }
   .plan-toolssep { width:1px; height:16px; background:var(--line); margin:0 3px; }
   .plan-empty { padding:10px 0; }
-  .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
+  .fc-short { display:none; }
+  .g3-text { font-size:11px; color:var(--text-muted); white-space:normal; min-width:0; }
   /* 기관 평가 표식 (업체명 앞) — 판정 배지 → 종합점수 → 하트, 사이 4px */
   .imark { flex:none; display:inline-flex; align-items:center; gap:4px; cursor:help; }
   /* 판정 문구 배지 — 색만으로는 뜻이 안 읽혀서 카드에는 글자를 그대로 쓴다 */
@@ -4320,6 +4346,58 @@ function pageShell(title, body) {
   @media (max-width:560px){
     .grid { grid-template-columns: 1fr; }
     .stat-num { font-size:26px; }
+  }
+  /* ---- 모바일 줄바꿈 정리 (375~430px 기준으로 맞춤) ----
+     원칙: 헤더 한 줄, 상태바 한 줄(나머지는 ▾), 정렬 칩 한 줄(가로 스크롤).
+     줄이 늘어나는 대신 글자를 줄이거나 라벨을 축약해 세로 공간을 지킨다. */
+  @media (max-width:640px) {
+    /* 헤더: 제목과 탭 3개를 한 줄에 */
+    .header { flex-wrap:nowrap; gap:8px; margin-bottom:14px; }
+    .logo { font-size:19px; flex:none; }
+    .navlinks { width:auto; flex-wrap:nowrap; justify-content:flex-end; gap:5px; min-width:0; }
+    .navlink { font-size:12px; padding:6px 9px; }
+
+    /* 상태바: 핵심 3개만 남기고 접는다 */
+    .statusbar { flex-wrap:nowrap; overflow:hidden; gap:6px; padding:9px 12px; font-size:12.5px; }
+    .sb-extra { display:none; }
+    .sb-more { display:inline-flex; }
+    .statusbar.sb-open { flex-wrap:wrap; overflow:visible; }
+    .statusbar.sb-open .sb-extra { display:contents; }
+
+    /* 정렬 칩: 축약 라벨 + 한 줄 가로 스크롤(스크롤바 숨김) */
+    .plan-tools { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none;
+      -webkit-overflow-scrolling:touch; padding-bottom:2px; }
+    .plan-tools::-webkit-scrollbar { display:none; }
+    .plan-tools > * { flex:none; }
+    .fc-full { display:none; }
+    .fc-short { display:inline; }
+
+    /* 감시 조건줄도 같은 방식으로 한 줄에 가둔다 */
+    .condbar { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; padding-bottom:2px; }
+    .condbar::-webkit-scrollbar { display:none; }
+    .condbar > * { flex:none; }
+  }
+
+  /* 아주 좁은 폭(375 안팎): 탭은 아이콘만, 현재 탭만 라벨을 남긴다 */
+  @media (max-width:400px) {
+    .logo { font-size:17.5px; }
+    .navlink { padding:6px 8px; }
+    .navlink .nav-label { display:none; }
+    .navlink.on .nav-label { display:inline; }
+    .navlink .nav-ico { margin-right:0; }
+    .navlink.on .nav-ico { margin-right:4px; }
+  }
+
+  /* 카드: 잔여 표시 줄과 태그 칩줄 */
+  @media (max-width:430px) {
+    /* 게이지와 수치를 위아래로 나눈다. 나란히 두면 수치 칸이 116px 밖에 안 나와
+       '잔여 N학급' 과 괄호가 억지로 갈린다. 폰트도 한 단계 줄인다. */
+    .pi-cap { flex-wrap:wrap; row-gap:4px; gap:0; }
+    .g3 { flex:1 1 100%; max-width:none; }
+    .g3-text { font-size:10.5px; flex:1 1 100%; }
+    /* 그래도 넘치면 괄호 묶음만 통째로 다음 줄로 (숫자가 중간에서 갈리지 않게) */
+    .cap-detail { white-space:nowrap; }
+    .pi-tags, .tchips { min-width:0; }
   }
 </style>
 </head>
