@@ -1389,6 +1389,67 @@ const PRACTICE_PROGRAMS = [
   },
 ];
 
+// 주소 검색 모달용 더미 도로명 주소.
+// 카카오/도로명주소 API 를 쓰지 않는다 — 이 목록 안에서만 필터링한다(외부 통신 없음).
+// 실존 학교 주소가 아니라 형태만 맞춘 가상 주소다.
+const PRACTICE_ADDRESSES = [
+  { zip: '06134', road: '서울특별시 강남구 테헤란로 152', jibun: '역삼동 737' },
+  { zip: '04524', road: '서울특별시 중구 세종대로 110', jibun: '태평로1가 31' },
+  { zip: '07995', road: '서울특별시 양천구 목동동로 375', jibun: '목동 917' },
+  { zip: '08826', road: '서울특별시 관악구 관악로 1', jibun: '신림동 산56-1' },
+  { zip: '02841', road: '서울특별시 성북구 안암로 145', jibun: '안암동5가 1-2' },
+  { zip: '05006', road: '서울특별시 광진구 능동로 209', jibun: '화양동 98' },
+  { zip: '01811', road: '서울특별시 노원구 화랑로 621', jibun: '공릉동 172' },
+  { zip: '13529', road: '경기도 성남시 분당구 판교역로 235', jibun: '삼평동 681' },
+  { zip: '16489', road: '경기도 수원시 영통구 월드컵로 206', jibun: '원천동 산5' },
+  { zip: '10390', road: '경기도 고양시 일산서구 킨텍스로 217', jibun: '대화동 2600' },
+  { zip: '14059', road: '경기도 안양시 동안구 시민대로 235', jibun: '관양동 1591' },
+  { zip: '11759', road: '경기도 의정부시 시민로 1', jibun: '의정부동 220' },
+  { zip: '17058', road: '경기도 용인시 처인구 명지로 116', jibun: '남동 산38-2' },
+  { zip: '21554', road: '인천광역시 남동구 예술로 152', jibun: '구월동 1131' },
+  { zip: '24341', road: '강원특별자치도 춘천시 중앙로 1', jibun: '봉의동 15' },
+  { zip: '34126', road: '대전광역시 유성구 대학로 291', jibun: '구성동 373-1' },
+  { zip: '28644', road: '충청북도 청주시 서원구 충대로 1', jibun: '개신동 12' },
+  { zip: '61186', road: '광주광역시 북구 첨단과기로 123', jibun: '오룡동 1', },
+  { zip: '42601', road: '대구광역시 달서구 달구벌대로 1095', jibun: '신당동 1095' },
+  { zip: '46241', road: '부산광역시 금정구 부산대학로63번길 2', jibun: '장전동 30' },
+  { zip: '52828', road: '경상남도 진주시 진주대로 501', jibun: '가좌동 900' },
+  { zip: '63243', road: '제주특별자치도 제주시 제주대학로 102', jibun: '아라일동 1' },
+];
+
+// 문제 생성 요소 — 연습 시작마다 랜덤 조합된다.
+const PRACTICE_QUIZ = {
+  sessions: [8, 12, 16],
+  ranges: [
+    { label: '초등학교 1~6학년 전체', row: 'elem' },
+    { label: '초등학교 1~4학년', row: 'elem' },
+    { label: '초등학교 5~6학년', row: 'elem' },
+    { label: '초등학교 3~6학년', row: 'elem' },
+    { label: '초등학교 1~2학년', row: 'elem' },
+    { label: '중학교 1~3학년', row: 'mid' },
+  ],
+  gradeRows: [
+    { key: 'elem', label: '초등학교 1~6학년' },
+    { key: 'mid', label: '중학교 1~3학년' },
+    { key: 'high', label: '고등학교 1~3학년' },
+  ],
+  opTimes: [
+    '비교과 자유학기제',
+    '비교과 창체 진로',
+    '비교과 창체 동아리',
+    '비교과 창체 자율',
+    '방과후 주중',
+    '방과후 주말',
+  ],
+  // 실전 요령 연습용 정형문구 (요청사항에 한 번에 붙여넣는다)
+  boilerplate:
+    '– 교육 대상: 본교 재학생 학급 단위\n' +
+    '– 희망 시간대: 정규 수업 종료 후 (교내 협의 완료)\n' +
+    '– 준비물: 노트북·태블릿 교내 보유분 활용 가능\n' +
+    '– 주차: 교내 방문객 주차 가능 (사전 연락 요망)\n' +
+    '– 담당자 연락 가능 시간: 평일 09:00~16:30',
+};
+
 app.get('/practice', (req, res) => {
   res.send(pageShell('신청 연습', `
     <div class="header">
@@ -1437,22 +1498,151 @@ app.get('/practice', (req, res) => {
     </div>
 
     <div class="card" id="prFormCard" hidden>
-      <div class="card-title">신청 폼</div>
-      <div class="pr-formph">
-        <div class="pr-formph-ico" aria-hidden="true">📝</div>
-        <div>
-          <b>폼 준비 중</b>
-          <div class="muted small" style="margin-top:4px;">
-            신청 폼 항목은 다음 단계에서 추가됩니다. 입력값은 서버로 보내지 않고
-            브라우저 안에서만 채점합니다.
+      <div class="card-title">신청서 작성 <span class="muted small">(계측 중 — 아래 [신청] 까지)</span></div>
+
+      <!-- 프로그램 기본정보: 실전처럼 '위를 보고 아래를 채우는' 구조 -->
+      <div class="pf-info">
+        <div class="pf-info-title">📋 프로그램 기본정보</div>
+        <dl class="pf-info-list" id="pfInfoList"></dl>
+        <div class="pf-info-hint" id="pfInfoHint"></div>
+      </div>
+
+      <!-- 1) 담당자 정보 — 고정 더미, 계측 대상 아님 -->
+      <section class="pf-sec">
+        <div class="pf-legend">1. 담당자 정보
+          <span class="pf-tag">자동 입력 · 수정 불가 · 계측 제외</span>
+        </div>
+        <div class="pf-grid2">
+          <label class="pf-field"><span class="pf-label">현장 담당자명</span>
+            <input class="pf-in" value="홍길동" readonly tabindex="-1"></label>
+          <label class="pf-field"><span class="pf-label">연락처</span>
+            <input class="pf-in" value="010-1234-5678" readonly tabindex="-1"></label>
+          <label class="pf-field"><span class="pf-label">이메일</span>
+            <input class="pf-in" value="hong@naver.com" readonly tabindex="-1"></label>
+          <label class="pf-field"><span class="pf-label">소속학교</span>
+            <input class="pf-in" value="○○초등학교" readonly tabindex="-1"></label>
+        </div>
+        <div class="muted small" style="margin-top:7px;">
+          전부 고정 더미값입니다. 실제 개인정보를 넣지 마세요.
+        </div>
+      </section>
+
+      <!-- 2) 교육 장소 주소 -->
+      <section class="pf-sec">
+        <div class="pf-legend">2. 교육 장소 주소 <b class="pf-req">*</b></div>
+        <div class="pf-addr-row">
+          <input class="pf-in" id="pfAddr" placeholder="주소 검색으로 입력하세요" readonly>
+          <button type="button" class="btn btn-sm btn-ghost" id="pfAddrBtn">주소 검색</button>
+        </div>
+        <input class="pf-in" id="pfAddrDetail" placeholder="상세주소 (선택 — 비워도 됩니다)" style="margin-top:7px;">
+      </section>
+
+      <!-- 3) 신청 교육 대상 -->
+      <section class="pf-sec">
+        <div class="pf-legend">3. 신청 교육 대상 <b class="pf-req">*</b></div>
+        <select class="pf-in" id="pfTarget">
+          <option value="">선택</option>
+          <option value="일반학교">일반학교</option>
+          <option value="초등돌봄·교육(구 늘봄학교)">초등돌봄·교육(구 늘봄학교)</option>
+          <option value="특성화·마이스터고등학교">특성화·마이스터고등학교</option>
+          <option value="학교밖(대안학교, 센터 등)">학교밖(대안학교, 센터 등)</option>
+        </select>
+      </section>
+
+      <!-- 4) 신청 가능 대상 -->
+      <section class="pf-sec">
+        <div class="pf-legend">4. 신청 가능 대상 <b class="pf-req">*</b>
+          <span class="pf-tag">모집 학년 범위에 해당하는 항목만 선택 가능</span>
+        </div>
+        <div class="pf-grades" id="pfGrades"></div>
+      </section>
+
+      <!-- 5~6) 신청 인원 / 총 교육 차시 -->
+      <section class="pf-sec">
+        <div class="pf-grid2">
+          <label class="pf-field"><span class="pf-label">5. 신청 인원 <b class="pf-req">*</b></span>
+            <input class="pf-in" id="pfCount" type="number" min="1" max="99" inputmode="numeric" placeholder="명"></label>
+          <label class="pf-field"><span class="pf-label">6. 총 교육 차시 <b class="pf-req">*</b></span>
+            <input class="pf-in" id="pfSessions" type="number" min="1" max="99" inputmode="numeric" placeholder="차시"></label>
+        </div>
+      </section>
+
+      <!-- 7) 교육 시작일 / 종료일 -->
+      <section class="pf-sec">
+        <div class="pf-legend">7. 교육 시작일 / 종료일 <b class="pf-req">*</b></div>
+        <div class="pf-datewrap">
+          <span class="pf-label">시작</span>
+          <div class="pf-daterow">
+            <input class="pf-in" id="pfStartDate" type="date">
+            <select class="pf-in pf-in-sm" id="pfStartH"></select>
+            <select class="pf-in pf-in-sm" id="pfStartM"></select>
           </div>
         </div>
+        <div class="pf-datewrap" style="margin-top:8px;">
+          <span class="pf-label">종료</span>
+          <div class="pf-daterow">
+            <input class="pf-in" id="pfEndDate" type="date">
+            <select class="pf-in pf-in-sm" id="pfEndH"></select>
+            <select class="pf-in pf-in-sm" id="pfEndM"></select>
+          </div>
+        </div>
+      </section>
+
+      <!-- 8) 운영시간 -->
+      <section class="pf-sec">
+        <div class="pf-legend">8. 운영시간 <b class="pf-req">*</b></div>
+        <select class="pf-in" id="pfOpTime"></select>
+      </section>
+
+      <!-- 9) 요청사항 -->
+      <section class="pf-sec">
+        <div class="pf-legend">9. 요청사항 <span class="pf-tag">선택 — 비워도 통과</span></div>
+        <textarea class="pf-in pf-ta" id="pfNote" rows="4" placeholder="운영기관에 전달할 요청사항"></textarea>
+        <button type="button" class="btn btn-sm btn-ghost" id="pfBoiler" style="margin-top:7px;">
+          📋 정형문구 붙여넣기
+        </button>
+      </section>
+
+      <!-- 10) 약관 동의 -->
+      <section class="pf-sec">
+        <div class="pf-legend">10. 약관 동의 <b class="pf-req">*</b></div>
+        <label class="pf-agree pf-agree-all">
+          <input type="checkbox" id="pfAgreeAll"><span><b>전체 동의</b></span>
+        </label>
+        <label class="pf-agree">
+          <input type="checkbox" id="pfAgree1"><span><b class="pf-must">[필수]</b> 개인정보 수집 및 이용 동의</span>
+        </label>
+        <label class="pf-agree">
+          <input type="checkbox" id="pfAgree2"><span><b class="pf-must">[필수]</b> 개인정보 제3자 제공 동의</span>
+        </label>
+      </section>
+
+      <div class="pf-submitmsg" id="pfSubmitMsg" role="status"></div>
+      <div class="pf-actions">
+        <button type="button" class="btn btn-ghost" id="pfCancel">취소</button>
+        <button type="button" class="btn btn-green" id="pfSubmit">신청</button>
+      </div>
+    </div>
+
+    <!-- 주소 검색 모달 — 자체 더미 목록만 쓴다 (외부 API 호출 없음) -->
+    <div class="pf-modal" id="pfModal" hidden>
+      <div class="pf-modal-back" id="pfModalBack"></div>
+      <div class="pf-modal-box" role="dialog" aria-modal="true" aria-labelledby="pfModalTitle">
+        <div class="pf-modal-head">
+          <b id="pfModalTitle">주소 검색</b>
+          <button type="button" class="pf-modal-x" id="pfModalX" aria-label="닫기">✕</button>
+        </div>
+        <div class="muted small" style="margin-bottom:9px;">
+          연습용 더미 주소 목록입니다. 외부 주소 API 를 호출하지 않습니다.
+        </div>
+        <input class="pf-in" id="pfSearch" placeholder="도로명·지역명 두 글자 이상 입력" autocomplete="off">
+        <div class="pf-results" id="pfResults"></div>
       </div>
     </div>
 
     <div class="card">
       <div class="row-between">
-        <div class="card-title" style="margin-bottom:0;">📊 내 기록 <span class="muted small">(최근 10회)</span></div>
+        <div class="card-title" style="margin-bottom:0;">📊 내 기록 <span class="muted small">(최근 20회)</span></div>
         <button id="prReset" class="btn btn-sm btn-ghost">기록 초기화</button>
       </div>
       <div class="pr-best" id="prBest"></div>
@@ -1463,8 +1653,12 @@ app.get('/practice', (req, res) => {
       // ============ 신청 연습 ============
       // 전부 클라이언트에서만 동작한다. 서버·외부로 나가는 요청이 하나도 없다.
       var PROGRAMS = ${JSON.stringify(PRACTICE_PROGRAMS)};
-      var STORE_KEY = 'saessak:practice:v1';
-      var MAX_RECORDS = 10;
+      var ADDRESSES = ${JSON.stringify(PRACTICE_ADDRESSES)};
+      var QUIZ = ${JSON.stringify(PRACTICE_QUIZ)};
+      // v2: 기록 항목이 '반응시간' 에서 '폼 작성 총시간' 으로 바뀌어 키를 올렸다.
+      var STORE_KEY = 'saessak:practice:v2';
+      var MAX_RECORDS = 20;
+      var SEG_LABELS = ['주소 입력까지', '대상·인원·차시까지', '날짜·운영시간까지', '약관·제출까지'];
 
       var el = {
         start: document.getElementById('prStart'),
@@ -1481,13 +1675,89 @@ app.get('/practice', (req, res) => {
         best: document.getElementById('prBest'),
         records: document.getElementById('prRecords'),
         reset: document.getElementById('prReset'),
+        // 폼
+        infoList: document.getElementById('pfInfoList'),
+        infoHint: document.getElementById('pfInfoHint'),
+        addr: document.getElementById('pfAddr'),
+        addrDetail: document.getElementById('pfAddrDetail'),
+        addrBtn: document.getElementById('pfAddrBtn'),
+        target: document.getElementById('pfTarget'),
+        grades: document.getElementById('pfGrades'),
+        count: document.getElementById('pfCount'),
+        sessions: document.getElementById('pfSessions'),
+        startDate: document.getElementById('pfStartDate'),
+        startH: document.getElementById('pfStartH'),
+        startM: document.getElementById('pfStartM'),
+        endDate: document.getElementById('pfEndDate'),
+        endH: document.getElementById('pfEndH'),
+        endM: document.getElementById('pfEndM'),
+        opTime: document.getElementById('pfOpTime'),
+        note: document.getElementById('pfNote'),
+        boiler: document.getElementById('pfBoiler'),
+        agreeAll: document.getElementById('pfAgreeAll'),
+        agree1: document.getElementById('pfAgree1'),
+        agree2: document.getElementById('pfAgree2'),
+        submitMsg: document.getElementById('pfSubmitMsg'),
+        cancel: document.getElementById('pfCancel'),
+        submit: document.getElementById('pfSubmit'),
+        // 주소 모달
+        modal: document.getElementById('pfModal'),
+        modalBack: document.getElementById('pfModalBack'),
+        modalX: document.getElementById('pfModalX'),
+        search: document.getElementById('pfSearch'),
+        results: document.getElementById('pfResults'),
       };
 
       // ---- 상태 ----
-      var phase = 'idle';   // 'idle' | 'open' | 'done'
+      var phase = 'idle';   // 'idle' | 'open' | 'form' | 'done'
       var openedAt = 0;     // 모집 중으로 바뀐 시각 (performance.now)
+      var formAt = 0;       // [신청하기] 를 누른 시각 = 폼 계측 시작점
       var missCount = 0;    // 헛클릭 (열리기 전 클릭)
+      var reactionMs = 0;   // 모집 중 → 신청하기 반응시간
       var current = null;
+      var quiz = null;      // 이번 회차 문제
+      var segAt = [];       // 구간 경계 시각 (performance.now)
+
+      function rand(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+      function randInt(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+
+      // ---- 문제 생성 ----
+      function makeQuiz() {
+        // 인원 상한: 90% 20명, 10% 22~25명 (후자는 안내문에 'N명 이상 모집' 표기)
+        var over = Math.random() < 0.1;
+        var cap = over ? randInt(22, 25) : 20;
+        var weekend = Math.random() < 0.5;
+        return {
+          sessions: rand(QUIZ.sessions),
+          range: rand(QUIZ.ranges),
+          cap: cap,
+          capOver: over,
+          weekend: weekend,
+          opAnswer: weekend ? '방과후 주말' : '방과후 주중',
+        };
+      }
+
+      // ---- 기본정보 박스 ----
+      function renderQuizInfo() {
+        el.infoList.innerHTML = '';
+        var rows = [
+          ['총 교육 차시', quiz.sessions + '차시'],
+          ['모집 학년 범위', quiz.range.label],
+          ['모집 인원', quiz.capOver ? quiz.cap + '명 이상 모집' : quiz.cap + '명'],
+          ['운영 구분', quiz.weekend ? '주말 운영' : '평일(주중) 운영'],
+        ];
+        rows.forEach(function (r) {
+          var dt = document.createElement('dt');
+          dt.textContent = r[0];
+          var dd = document.createElement('dd');
+          dd.textContent = r[1];
+          el.infoList.appendChild(dt);
+          el.infoList.appendChild(dd);
+        });
+        el.infoHint.textContent = quiz.weekend
+          ? '※ 이 프로그램은 주말에 운영됩니다. 운영시간 항목을 그에 맞게 고르세요.'
+          : '※ 이 프로그램은 평일(주중) 방과후에 운영됩니다. 운영시간 항목을 그에 맞게 고르세요.';
+      }
 
       // ---- 저장소 (localStorage 전용) ----
       // best 는 records 와 따로 둔다. 목록은 최근 10회만 남기므로, 최고기록을
@@ -1507,7 +1777,9 @@ app.get('/practice', (req, res) => {
         try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch (_) { /* 저장 불가 시 이번 회차만 표시 */ }
       }
       function minOf(records) {
+        // 실격 회차는 최고기록 후보가 아니다
         return records.reduce(function (m, r) {
+          if (r.dq) return m;
           return (m == null || r.ms < m) ? r.ms : m;
         }, null);
       }
@@ -1550,19 +1822,277 @@ app.get('/practice', (req, res) => {
           el.apply.setAttribute('aria-disabled', 'false');
           el.applyMsg.textContent = '';
           el.applyMsg.className = 'pr-applymsg';
+        } else if (next === 'form') {
+          // 폼 작성 중. 상세의 신청하기는 다시 잠근다.
+          el.apply.classList.add('is-locked');
+          el.apply.setAttribute('aria-disabled', 'true');
+          el.formCard.hidden = false;
         } else if (next === 'done') {
           // 신청을 마친 상태. 뱃지는 '모집 중' 그대로 두되(실제 사이트도 그렇다)
           // 버튼은 다시 잠근다 — 활성처럼 보이는데 누르면 헛클릭이 오르는 걸 막는다.
           el.apply.classList.add('is-locked');
           el.apply.setAttribute('aria-disabled', 'true');
+          el.formCard.hidden = true;
         }
       }
 
       function setStatus(html) { el.status.innerHTML = html; }
 
+      // ================= 폼 =================
+
+      // ---- 폼 초기화 (회차마다) ----
+      function buildForm() {
+        // 시/분 셀렉트
+        function fill(sel, list, ph) {
+          sel.innerHTML = '';
+          var o0 = document.createElement('option');
+          o0.value = ''; o0.textContent = ph;
+          sel.appendChild(o0);
+          list.forEach(function (v) {
+            var o = document.createElement('option');
+            o.value = v; o.textContent = v;
+            sel.appendChild(o);
+          });
+        }
+        var hours = [], mins = [];
+        for (var h = 8; h <= 20; h++) hours.push((h < 10 ? '0' : '') + h);
+        for (var m = 0; m < 60; m += 10) mins.push((m < 10 ? '0' : '') + m);
+        fill(el.startH, hours, '시'); fill(el.startM, mins, '분');
+        fill(el.endH, hours, '시'); fill(el.endM, mins, '분');
+
+        // 운영시간
+        el.opTime.innerHTML = '';
+        var o0 = document.createElement('option');
+        o0.value = ''; o0.textContent = '선택';
+        el.opTime.appendChild(o0);
+        QUIZ.opTimes.forEach(function (v) {
+          var o = document.createElement('option');
+          o.value = v; o.textContent = v;
+          el.opTime.appendChild(o);
+        });
+
+        // 신청 가능 대상 — 이번 문제 범위에 해당하는 행만 활성화
+        el.grades.innerHTML = '';
+        QUIZ.gradeRows.forEach(function (row) {
+          var on = row.key === quiz.range.row;
+          var lab = document.createElement('label');
+          lab.className = 'pf-grade' + (on ? '' : ' is-off');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.className = 'pf-gradecb';
+          cb.value = row.key;
+          // 잠긴 행은 실제로 못 켜게 한다 (aria-disabled 로 안내 + change 에서 되돌림)
+          if (!on) {
+            cb.setAttribute('aria-disabled', 'true');
+            cb.addEventListener('click', function (e) { e.preventDefault(); });
+          }
+          var sp = document.createElement('span');
+          sp.textContent = row.label + (on ? '' : ' — 이번 모집 범위 아님');
+          lab.appendChild(cb); lab.appendChild(sp);
+          el.grades.appendChild(lab);
+        });
+
+        // 값 비우기
+        el.addr.value = ''; el.addrDetail.value = '';
+        el.target.value = '';
+        el.count.value = ''; el.sessions.value = '';
+        el.startDate.value = ''; el.endDate.value = '';
+        el.opTime.value = '';
+        el.note.value = '';
+        el.agreeAll.checked = false; el.agree1.checked = false; el.agree2.checked = false;
+        el.submitMsg.textContent = ''; el.submitMsg.className = 'pf-submitmsg';
+        clearMarks();
+      }
+
+      function clearMarks() {
+        var marked = el.formCard.querySelectorAll('.pf-bad');
+        for (var i = 0; i < marked.length; i++) marked[i].classList.remove('pf-bad');
+      }
+
+      // ---- 구간 계측 ----
+      // 구간 k 는 '그룹 1..k 가 모두 채워진 시점' 에 닫는다. 누적 판정이라
+      // 순서를 바꿔 입력해도 구간 길이가 음수가 되지 않는다.
+      function groupDone(i) {
+        if (i === 0) return !!el.addr.value;
+        if (i === 1) {
+          return !!el.target.value &&
+            el.grades.querySelectorAll('.pf-gradecb:checked').length > 0 &&
+            el.count.value !== '' && el.sessions.value !== '';
+        }
+        if (i === 2) {
+          return !!el.startDate.value && !!el.startH.value && !!el.startM.value &&
+            !!el.endDate.value && !!el.endH.value && !!el.endM.value && !!el.opTime.value;
+        }
+        return false;
+      }
+      function checkSegments() {
+        if (phase !== 'form') return;
+        for (var k = 0; k < 3; k++) {
+          if (segAt[k] != null) continue;
+          var all = true;
+          for (var j = 0; j <= k; j++) if (!groupDone(j)) { all = false; break; }
+          if (!all) break;          // 앞 구간이 안 닫혔으면 뒤도 닫지 않는다
+          segAt[k] = performance.now();
+        }
+      }
+
+      // 폼 안의 모든 입력 변화에 구간 판정을 건다
+      ['input', 'change'].forEach(function (ev) {
+        el.formCard.addEventListener(ev, checkSegments);
+      });
+
+      // ---- 주소 검색 모달 (더미 목록 필터링 · 외부 통신 없음) ----
+      function openModal() {
+        el.modal.hidden = false;
+        el.search.value = '';
+        renderResults('');
+        el.search.focus();
+      }
+      function closeModal() { el.modal.hidden = true; }
+      function renderResults(q) {
+        var term = String(q || '').trim();
+        if (term.length < 2) {
+          el.results.innerHTML = '<div class="pf-results-ph">두 글자 이상 입력하면 목록이 나타납니다.</div>';
+          return;
+        }
+        var hits = ADDRESSES.filter(function (a) {
+          return a.road.indexOf(term) >= 0 || a.jibun.indexOf(term) >= 0 || a.zip.indexOf(term) >= 0;
+        }).slice(0, 6);
+        if (!hits.length) {
+          el.results.innerHTML = '<div class="pf-results-ph">검색 결과가 없습니다. (연습용 더미 목록)</div>';
+          return;
+        }
+        el.results.innerHTML = hits.map(function (a) {
+          return '<button type="button" class="pf-result" data-road="' + escAttr(a.road) + '">' +
+            '<span class="pf-zip">' + a.zip + '</span>' +
+            '<span class="pf-road">' + a.road + '</span>' +
+            '<span class="pf-jibun">' + a.jibun + '</span>' +
+            '</button>';
+        }).join('');
+      }
+      function escAttr(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      }
+
+      el.addrBtn.addEventListener('click', openModal);
+      el.modalBack.addEventListener('click', closeModal);
+      el.modalX.addEventListener('click', closeModal);
+      el.search.addEventListener('input', function () { renderResults(el.search.value); });
+      el.results.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('.pf-result') : null;
+        if (!b) return;
+        el.addr.value = b.getAttribute('data-road');
+        el.addr.classList.remove('pf-bad');
+        closeModal();
+        checkSegments();
+        el.addrDetail.focus();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !el.modal.hidden) closeModal();
+      });
+
+      // ---- 정형문구 ----
+      el.boiler.addEventListener('click', function () {
+        el.note.value = ${JSON.stringify(PRACTICE_QUIZ.boilerplate)};
+        el.note.focus();
+      });
+
+      // ---- 전체동의 ----
+      el.agreeAll.addEventListener('change', function () {
+        el.agree1.checked = el.agreeAll.checked;
+        el.agree2.checked = el.agreeAll.checked;
+        syncAgreeAll();
+      });
+      function syncAgreeAll() {
+        el.agreeAll.checked = el.agree1.checked && el.agree2.checked;
+        if (el.agree1.checked && el.agree2.checked) {
+          [el.agree1, el.agree2].forEach(function (x) { x.closest('.pf-agree').classList.remove('pf-bad'); });
+        }
+      }
+      el.agree1.addEventListener('change', syncAgreeAll);
+      el.agree2.addEventListener('change', syncAgreeAll);
+
+      // ---- 채점 ----
+      // 반환: 틀린 항목 목록. 빈 배열이면 통과.
+      function grade() {
+        var bad = [];
+        function fail(node, msg) {
+          if (node) node.classList.add('pf-bad');
+          bad.push(msg);
+        }
+        if (!el.addr.value) fail(el.addr, '교육 장소 주소를 입력하지 않았습니다');
+        if (el.target.value !== '일반학교') {
+          fail(el.target, '신청 교육 대상이 다릅니다 (정답: 일반학교)');
+        }
+        var checked = el.grades.querySelectorAll('.pf-gradecb:checked');
+        if (!checked.length) {
+          fail(el.grades, '신청 가능 대상을 하나도 고르지 않았습니다');
+        } else {
+          for (var i = 0; i < checked.length; i++) {
+            if (checked[i].value !== quiz.range.row) {
+              fail(el.grades, '모집 범위 밖의 학년을 선택했습니다');
+              break;
+            }
+          }
+        }
+        if (Number(el.count.value) !== quiz.cap) {
+          fail(el.count, '신청 인원이 다릅니다 (정답: ' + quiz.cap + '명)');
+        }
+        if (Number(el.sessions.value) !== quiz.sessions) {
+          fail(el.sessions, '총 교육 차시가 다릅니다 (정답: ' + quiz.sessions + '차시)');
+        }
+        // 날짜·시각은 형식만 본다 (값 검증 없음)
+        if (!el.startDate.value || !el.startH.value || !el.startM.value) {
+          fail(el.startDate, '교육 시작일시를 다 채우지 않았습니다');
+        }
+        if (!el.endDate.value || !el.endH.value || !el.endM.value) {
+          fail(el.endDate, '교육 종료일시를 다 채우지 않았습니다');
+        }
+        if (el.opTime.value !== quiz.opAnswer) {
+          fail(el.opTime, '운영시간이 다릅니다 (정답: ' + quiz.opAnswer + ')');
+        }
+        return bad;
+      }
+
+      // ---- 제출 ----
+      el.submit.addEventListener('click', function () {
+        if (phase !== 'form') return;
+        clearMarks();
+
+        // 필수 약관은 유일한 '제출 차단' 조건이다 (실제 사이트와 같다)
+        if (!el.agree1.checked || !el.agree2.checked) {
+          [el.agree1, el.agree2].forEach(function (x) {
+            if (!x.checked) x.closest('.pf-agree').classList.add('pf-bad');
+          });
+          el.submitMsg.textContent = '필수 약관 2개에 모두 동의해야 신청할 수 있습니다.';
+          el.submitMsg.className = 'pf-submitmsg pf-submitmsg-warn';
+          return;
+        }
+
+        var endAt = performance.now();
+        segAt[3] = endAt;
+        // 아직 안 닫힌 앞 구간은 제출 시점으로 닫는다 (건너뛴 채 제출한 경우)
+        for (var k = 0; k < 3; k++) if (segAt[k] == null) segAt[k] = endAt;
+
+        var bad = grade();
+        var totalMs = endAt - formAt;
+        setPhase('done');
+        recordRun(totalMs, bad);
+      });
+
+      el.cancel.addEventListener('click', function () {
+        // 기록하지 않고 대기 상태로 되돌린다
+        setPhase('idle');
+        setStatus('연습을 취소했습니다. [다시 연습] 을 누르면 새 문제로 시작합니다.');
+      });
+
       // ---- 연습 시작 ----
       el.start.addEventListener('click', function () {
         renderProgram(pickProgram());
+        quiz = makeQuiz();          // 회차마다 새 문제
+        renderQuizInfo();
+        buildForm();
+        segAt = [null, null, null, null];
         // missCount 는 여기서 지우지 않는다. 버튼이 잠겨 있는 구간은 '연습 시작' 이전이라,
         // 여기서 리셋하면 헛클릭이 어느 회차에도 기록되지 못한다. 기다리는 동안의
         // 헛클릭은 뒤이은 회차의 것으로 본다 (기록 후 recordRun 에서 0으로 되돌린다).
@@ -1589,36 +2119,89 @@ app.get('/practice', (req, res) => {
           el.applyMsg.className = 'pr-applymsg pr-applymsg-warn';
           return;
         }
-        var ms = Math.round(performance.now() - openedAt);
-        setPhase('done');
-        recordRun(ms, missCount);
-        el.formCard.hidden = false;
-        el.formCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        // 여기부터가 폼 계측 시작점이다 (신청하기 클릭 → 최종 [신청] 클릭).
+        formAt = performance.now();
+        reactionMs = Math.round(formAt - openedAt);
+        setPhase('form');
+        setStatus('<b>작성 중</b> — 위 <b>프로그램 기본정보</b> 를 보고 아래 폼을 채운 뒤 [신청] 을 누르세요. ' +
+          '<span class="muted small">(모집 반응 ' + reactionMs + 'ms)</span>');
+        el.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
 
       // ---- 기록 ----
-      function recordRun(ms, miss) {
+      function fmtSec(ms) { return (ms / 1000).toFixed(2); }
+
+      function recordRun(totalMs, bad) {
+        var dq = bad.length > 0;   // 실격 — 시간은 남기되 최고기록 경쟁에서 뺀다
+
+        // 구간 길이
+        var durs = [];
+        var prev = formAt;
+        for (var k = 0; k < 4; k++) {
+          durs.push(Math.max(0, segAt[k] - prev));
+          prev = segAt[k];
+        }
+        var worstIdx = 0;
+        for (var i = 1; i < 4; i++) if (durs[i] > durs[worstIdx]) worstIdx = i;
+
         var d = load();
         var prevBest = d.best;
-        var isBest = prevBest == null || ms < prevBest;
+        // 실격 회차는 최고기록 갱신 대상이 아니다
+        var isBest = !dq && (prevBest == null || totalMs < prevBest);
 
-        d.records.unshift({ at: new Date().toISOString(), ms: ms, miss: miss });
+        d.records.unshift({
+          at: new Date().toISOString(),
+          ms: totalMs,
+          dq: dq,
+          worst: SEG_LABELS[worstIdx],
+          segs: durs.map(function (x) { return Math.round(x); }),
+          reaction: reactionMs,
+          miss: missCount,
+        });
         d.records = d.records.slice(0, MAX_RECORDS);
         d.total = (d.total || 0) + 1;
-        if (isBest) d.best = ms;
+        if (isBest) d.best = totalMs;
         save(d);
         missCount = 0; // 이번 회차에 반영했으므로 초기화
 
+        // ---- 결과 화면 ----
+        var segHtml = durs.map(function (x, i) {
+          return '<div class="pr-seg' + (i === worstIdx ? ' pr-seg-worst' : '') + '">' +
+            '<span class="pr-seg-label">' + SEG_LABELS[i] + '</span>' +
+            '<span class="pr-seg-bar"><i style="width:' +
+              (totalMs > 0 ? Math.round((x / totalMs) * 100) : 0) + '%"></i></span>' +
+            '<span class="pr-seg-val">' + fmtSec(x) + 's</span>' +
+            '</div>';
+        }).join('');
+
+        var badHtml = dq
+          ? '<div class="pr-badlist"><b>틀린 항목 ' + bad.length + '개</b><ul>' +
+            bad.map(function (b) { return '<li>' + b + '</li>'; }).join('') +
+            '</ul></div>'
+          : '';
+
         el.result.hidden = false;
-        el.result.className = 'pr-result' + (isBest ? ' pr-result-best' : '');
+        el.result.className = 'pr-result pr-result-block' +
+          (isBest ? ' pr-result-best' : '') + (dq ? ' pr-result-dq' : '');
         el.result.innerHTML =
-          '<span class="pr-ms">' + ms + '<span class="pr-ms-u">ms</span></span>' +
-          (isBest ? '<span class="pr-besttag">🏆 개인 최고기록!</span>' : '') +
-          (miss ? '<span class="pr-misstag">헛클릭 ' + miss + '회</span>' : '') +
-          (!isBest && prevBest != null
-            ? '<span class="muted small">최고기록 ' + prevBest + 'ms</span>'
-            : '');
-        setStatus('기록됐습니다. [다시 연습] 을 누르면 새 프로그램으로 이어서 연습합니다.');
+          '<div class="pr-resulthead">' +
+            '<span class="pr-ms">' + fmtSec(totalMs) + '<span class="pr-ms-u">초</span></span>' +
+            (dq ? '<span class="pr-dqtag">실격 — 순위 미포함</span>' : '') +
+            (isBest ? '<span class="pr-besttag">🏆 개인 최고기록!</span>' : '') +
+            (missCount ? '' : '') +
+            (!isBest && !dq && prevBest != null
+              ? '<span class="muted small">최고기록 ' + fmtSec(prevBest) + '초</span>' : '') +
+            '<span class="muted small">모집 반응 ' + reactionMs + 'ms</span>' +
+          '</div>' +
+          '<div class="pr-segs">' + segHtml + '</div>' +
+          '<div class="pr-worst">⏱ <b>' + SEG_LABELS[worstIdx] + '</b> 에서 가장 많이 지체됐습니다 (' +
+            fmtSec(durs[worstIdx]) + '초)</div>' +
+          badHtml;
+
+        setStatus(dq
+          ? '틀린 항목이 있어 <b>실격</b> 처리됐습니다. 시간은 기록에 남습니다. [다시 연습] 으로 새 문제를 받으세요.'
+          : '<b class="pr-open">전부 정답입니다.</b> [다시 연습] 을 누르면 새 문제로 이어서 연습합니다.');
+        el.result.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         renderRecords();
       }
 
@@ -1634,8 +2217,8 @@ app.get('/practice', (req, res) => {
         var best = d.best;
 
         el.best.innerHTML = best == null
-          ? '<span class="muted small">아직 기록이 없습니다.</span>'
-          : '개인 최고기록 <b class="pr-bestnum">' + best + 'ms</b>' +
+          ? '<span class="muted small">아직 완주 기록이 없습니다. (실격 회차는 최고기록에 넣지 않습니다)</span>'
+          : '개인 최고기록 <b class="pr-bestnum">' + fmtSec(best) + '초</b>' +
             ' <span class="muted small">· 누적 ' + (d.total || d.records.length) + '회</span>';
 
         if (!d.records.length) {
@@ -1643,13 +2226,15 @@ app.get('/practice', (req, res) => {
           return;
         }
         el.records.innerHTML =
-          '<div class="pr-rechead"><span>일시</span><span>반응시간</span><span>헛클릭</span></div>' +
+          '<div class="pr-rechead"><span>일시</span><span>총시간</span><span>결과</span><span>최대 지체 구간</span></div>' +
           d.records.map(function (r) {
-            var isBest = r.ms === best;
-            return '<div class="pr-recrow' + (isBest ? ' pr-recrow-best' : '') + '">' +
+            var isBest = !r.dq && r.ms === best;
+            return '<div class="pr-recrow' + (isBest ? ' pr-recrow-best' : '') +
+                (r.dq ? ' pr-recrow-dq' : '') + '">' +
               '<span class="pr-recwhen">' + fmtWhen(r.at) + '</span>' +
-              '<span class="pr-recms">' + r.ms + 'ms' + (isBest ? ' 🏆' : '') + '</span>' +
-              '<span class="pr-recmiss">' + (r.miss ? r.miss + '회' : '—') + '</span>' +
+              '<span class="pr-recms">' + fmtSec(r.ms) + '초' + (isBest ? ' 🏆' : '') + '</span>' +
+              '<span class="pr-recdq">' + (r.dq ? '실격' : '완주') + '</span>' +
+              '<span class="pr-recworst">' + (r.worst || '—') + '</span>' +
               '</div>';
           }).join('');
       }
@@ -3015,6 +3600,107 @@ function pageShell(title, body) {
   .pr-formph { display:flex; align-items:flex-start; gap:12px; padding:16px;
     border:1px dashed var(--line); border-radius:11px; background:var(--surface-1); }
   .pr-formph-ico { font-size:22px; line-height:1; }
+  /* ---- 결과: 구간 분해 ---- */
+  .pr-result-block { display:block; }
+  .pr-resulthead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .pr-result-dq { background:#fdeaea; border-color:#f3caca; }
+  .pr-dqtag { font-size:12px; font-weight:800; color:#a33; background:#fff;
+    border:1px solid #f3caca; padding:4px 9px; border-radius:999px; }
+  .pr-segs { margin-top:12px; display:grid; gap:5px; }
+  .pr-seg { display:grid; grid-template-columns:132px 1fr 56px; gap:9px; align-items:center; }
+  .pr-seg-label { font-size:12px; color:var(--text-secondary); }
+  .pr-seg-bar { height:8px; border-radius:999px; background:var(--surface-2);
+    border:1px solid var(--line); overflow:hidden; }
+  .pr-seg-bar i { display:block; height:100%; background:var(--green); }
+  .pr-seg-val { font-size:12px; font-weight:700; text-align:right; white-space:nowrap; }
+  .pr-seg-worst .pr-seg-label { color:#8a5a08; font-weight:700; }
+  .pr-seg-worst .pr-seg-bar i { background:var(--gauge-pend); }
+  .pr-worst { margin-top:10px; font-size:13px; color:var(--text-secondary); }
+  .pr-badlist { margin-top:11px; padding:11px 13px; border-radius:10px;
+    background:#fdeaea; border:1px solid #f3caca; color:#7a2020; font-size:13px; }
+  .pr-badlist ul { margin:6px 0 0; padding-left:18px; }
+  .pr-badlist li { margin:3px 0; }
+  .pr-recrow-dq .pr-recms { color:#a33; }
+  .pr-recdq { font-size:12px; font-weight:700; }
+  .pr-recrow-dq .pr-recdq { color:#a33; }
+  .pr-recworst { font-size:12px; color:var(--text-muted); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  /* ================= 신청 폼 ================= */
+  .pf-info { background:var(--surface-1); border:1px solid var(--line); border-left:3px solid var(--green);
+    border-radius:11px; padding:12px 14px; margin-bottom:14px; }
+  .pf-info-title { font-size:13px; font-weight:800; margin-bottom:8px; }
+  .pf-info-list { display:grid; grid-template-columns:104px 1fr; margin:0; gap:0; }
+  .pf-info-list dt { font-size:12px; color:var(--text-secondary); font-weight:700; padding:4px 0; }
+  .pf-info-list dd { font-size:13px; font-weight:700; margin:0; padding:4px 0; overflow-wrap:anywhere; }
+  .pf-info-hint { margin-top:8px; font-size:12px; color:#8a5a08; font-weight:600; line-height:1.45; }
+  .pf-sec { border-top:1px solid var(--line); padding:13px 0 0; margin:0 0 13px; }
+  .pf-sec:first-of-type { border-top:none; padding-top:0; }
+  .pf-legend { font-size:13px; font-weight:800; margin-bottom:8px; display:flex;
+    align-items:center; gap:7px; flex-wrap:wrap; }
+  .pf-req { color:#d9534f; }
+  .pf-must { color:#d9534f; }
+  .pf-tag { font-size:11px; font-weight:600; color:var(--text-muted); background:var(--surface-1);
+    border:1px solid var(--line); padding:2px 7px; border-radius:999px; }
+  .pf-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+  .pf-field { display:flex; flex-direction:column; gap:5px; min-width:0; }
+  .pf-label { font-size:12px; font-weight:700; color:var(--text-secondary); }
+  .pf-in { width:100%; min-width:0; font:inherit; font-size:14px; padding:10px 11px;
+    border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--ink); }
+  .pf-in:focus { outline:2px solid var(--green); outline-offset:-1px; }
+  .pf-in[readonly] { background:var(--surface-1); color:var(--text-muted); cursor:default; }
+  .pf-in-sm { max-width:88px; }
+  .pf-ta { resize:vertical; line-height:1.5; }
+  .pf-bad { border-color:#d9534f !important; background:#fdeaea; }
+  .pf-addr-row { display:flex; gap:8px; align-items:center; }
+  .pf-addr-row .pf-in { flex:1; }
+  .pf-addr-row .btn { white-space:nowrap; }
+  .pf-grades { display:grid; gap:7px; }
+  .pf-grade { display:flex; align-items:center; gap:9px; padding:10px 12px; border-radius:10px;
+    background:var(--surface-1); border:1px solid var(--line); font-size:13px; cursor:pointer; }
+  .pf-grade input { accent-color:var(--green); width:16px; height:16px; }
+  .pf-grade.is-off { opacity:.45; cursor:not-allowed; }
+  .pf-grade.is-off input { cursor:not-allowed; }
+  .pf-datewrap { display:flex; align-items:center; gap:10px; }
+  .pf-datewrap .pf-label { min-width:32px; }
+  .pf-daterow { display:flex; gap:7px; flex:1; min-width:0; }
+  .pf-daterow .pf-in:first-child { flex:1; min-width:0; }
+  .pf-agree { display:flex; align-items:center; gap:9px; padding:10px 12px; border-radius:10px;
+    border:1px solid var(--line); font-size:13px; cursor:pointer; margin-bottom:6px; }
+  .pf-agree input { accent-color:var(--green); width:16px; height:16px; }
+  .pf-agree-all { background:var(--surface-1); font-weight:700; }
+  .pf-submitmsg { min-height:18px; font-size:12px; text-align:center; margin:4px 0 8px; }
+  .pf-submitmsg-warn { color:#a33; font-weight:700; }
+  .pf-actions { display:flex; gap:9px; }
+  .pf-actions .btn { flex:1; padding:14px; font-size:15px; }
+  /* ---- 주소 검색 모달 ---- */
+  .pf-modal { position:fixed; inset:0; z-index:60; display:flex; align-items:center;
+    justify-content:center; padding:16px; }
+  .pf-modal-back { position:absolute; inset:0; background:rgba(0,0,0,.42); }
+  .pf-modal-box { position:relative; width:100%; max-width:440px; max-height:82vh; overflow:auto;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:16px;
+    box-shadow:0 14px 40px rgba(0,0,0,.22); }
+  .pf-modal-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+  .pf-modal-x { border:none; background:transparent; font-size:16px; cursor:pointer;
+    color:var(--text-muted); padding:4px 8px; border-radius:8px; }
+  .pf-modal-x:hover { background:var(--surface-1); }
+  .pf-results { margin-top:10px; display:grid; gap:6px; }
+  .pf-results-ph { font-size:12px; color:var(--text-muted); padding:14px 4px; text-align:center; }
+  .pf-result { display:grid; grid-template-columns:58px 1fr; gap:3px 9px; width:100%; text-align:left;
+    padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--surface-1);
+    cursor:pointer; font:inherit; color:inherit; }
+  .pf-result:hover { background:#eaf6ef; border-color:#bfe4cd; }
+  .pf-zip { grid-row:span 2; font-size:11px; font-weight:800; color:var(--text-muted);
+    align-self:center; }
+  .pf-road { font-size:13px; font-weight:700; overflow-wrap:anywhere; }
+  .pf-jibun { font-size:11px; color:var(--text-muted); overflow-wrap:anywhere; }
+  @media (prefers-color-scheme: dark) {
+    .pf-bad { background:#3a1f1f; }
+    .pf-result:hover { background:#17301f; border-color:#2b5c3c; }
+    .pr-result-dq { background:#3a1f1f; border-color:#5c2b2b; }
+    .pr-dqtag { background:#241414; border-color:#5c2b2b; color:#f0b4b4; }
+    .pr-badlist { background:#2a1818; border-color:#5c2b2b; color:#f0c4c4; }
+    .pf-info-hint { color:#e0bd7a; }
+  }
   /* ---- 기록 ---- */
   .pr-best { font-size:13px; margin:11px 0 9px; }
   .pr-bestnum { color:var(--green-d); font-size:15px; }
@@ -3049,7 +3735,31 @@ function pageShell(title, body) {
     .pr-card { padding:13px; }
     .pr-apply { font-size:15px; padding:15px; }
     .pr-ms { font-size:23px; }
-    .pr-rechead, .pr-recrow { grid-template-columns:1fr 76px 58px; gap:7px; }
+    /* 기록 표: 좁은 화면에서는 2열 2줄 구조로 접는다 */
+    .pr-rechead { display:none; }
+    .pr-recrow { grid-template-columns:1fr auto; row-gap:2px; }
+    .pr-recwhen { order:1; }
+    .pr-recms { order:2; text-align:right; }
+    .pr-recworst { order:3; grid-column:1; text-align:left; }
+    .pr-recdq { order:4; grid-column:2; text-align:right; }
+    /* 폼 */
+    .pf-grid2 { grid-template-columns:1fr; }
+    .pf-info-list { grid-template-columns:88px 1fr; }
+    .pf-datewrap { flex-direction:column; align-items:stretch; gap:5px; }
+    .pf-datewrap .pf-label { min-width:0; }
+    .pf-daterow { flex-wrap:wrap; }
+    .pf-daterow .pf-in:first-child { flex:1 1 100%; }
+    .pf-in-sm { flex:1; max-width:none; }
+    .pf-addr-row { flex-wrap:wrap; }
+    .pf-addr-row .pf-in { flex:1 1 100%; }
+    .pf-addr-row .btn { width:100%; }
+    .pf-actions .btn { padding:13px; font-size:14px; }
+    .pf-modal { padding:10px; }
+    .pf-modal-box { padding:13px; }
+    /* 구간 막대: 라벨을 위로 올리고 막대+값을 아래 줄에 */
+    .pr-seg { grid-template-columns:1fr 52px; row-gap:3px; }
+    .pr-seg-label { grid-column:1 / -1; }
+    .pr-seg-val { text-align:right; }
   }
   @media (max-width:560px){
     .nlog-head { display:none; }
