@@ -1450,7 +1450,9 @@ const PRACTICE_QUIZ = {
     '– 담당자 연락 가능 시간: 평일 09:00~16:30',
 };
 
-app.get('/practice', (req, res) => {
+// /settings 와 같은 방식으로 보호한다. ADMIN_PASSWORD 미설정 환경에서는
+// authEnabled() 가 false 라 requireAuth 가 그대로 통과시킨다(로컬 개발 편의 유지).
+app.get('/practice', requireAuth, (req, res) => {
   res.send(pageShell('신청 연습', `
     <div class="header">
       <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🏃 신청 연습</a>
@@ -3234,6 +3236,12 @@ function pageShell(title, body) {
     }
   }
   * { box-sizing: border-box; }
+  /* hidden 속성은 브라우저 기본 스타일시트의 [hidden]{display:none} 으로만 동작한다.
+     같은 요소에 클래스로 display 를 선언하면 — 특이도가 같아도 작성자 스타일시트가
+     UA 스타일시트를 이기므로 — hidden 이 무시되고 그대로 보인다.
+     실제로 .pf-modal{display:flex} 때문에 주소 검색 모달이 첫 화면부터 떠 있었다.
+     앞으로 display 를 선언한 요소에 hidden 을 붙여도 같은 사고가 나지 않도록 못을 박는다. */
+  [hidden] { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
     line-height:1.5; }
@@ -3675,6 +3683,10 @@ function pageShell(title, body) {
   /* ---- 주소 검색 모달 ---- */
   .pf-modal { position:fixed; inset:0; z-index:60; display:flex; align-items:center;
     justify-content:center; padding:16px; }
+  /* 전역 [hidden] 규칙과 겹치지만 일부러 남긴다 — display 를 선언한 바로 그 자리에서
+     "이 요소는 hidden 으로 숨긴다" 를 눈에 보이게 해 두어야 다음 사람이 안 밟는다. */
+  .pf-modal[hidden] { display:none; }
+  .pr-result[hidden] { display:none; }
   .pf-modal-back { position:absolute; inset:0; background:rgba(0,0,0,.42); }
   .pf-modal-box { position:relative; width:100%; max-width:440px; max-height:82vh; overflow:auto;
     background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:16px;
