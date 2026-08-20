@@ -58,13 +58,24 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// ============ 설정 비밀번호 보호 (HMAC 서명 쿠키, 외부 라이브러리 없이 crypto만) ============
+// ============ 비밀번호 보호 (HMAC 서명 쿠키, 외부 라이브러리 없이 crypto만) ============
 // ADMIN_PASSWORD 미설정 시 보호 없음(로컬 개발 편의).
+//
+// 등급이 둘이다.
+//   admin    — ADMIN_PASSWORD. 모든 화면 (마스터키)
+//   practice — PRACTICE_PASSWORD. /practice 만. 설정·수집 버튼은 막힌다
+// PRACTICE_PASSWORD 를 안 넣으면 예전과 똑같이 ADMIN_PASSWORD 하나만 통한다.
 const AUTH_COOKIE = 'sr_auth';
 const AUTH_MAX_AGE_SEC = 30 * 24 * 60 * 60; // 30일
+const ROLE_ADMIN = 'admin';
+const ROLE_PRACTICE = 'practice';
 
 function authEnabled() {
   return !!process.env.ADMIN_PASSWORD;
+}
+
+function practiceEnabled() {
+  return !!process.env.PRACTICE_PASSWORD;
 }
 
 // 서명 키: ADMIN_PASSWORD 로 HMAC → 비번을 바꾸면 기존 쿠키 자동 무효화
@@ -75,35 +86,53 @@ function signPayload(payload) {
     .digest('hex');
 }
 
-function makeToken() {
-  const payload = String(Date.now() + AUTH_MAX_AGE_SEC * 1000); // 만료 시각(ms)
+// payload = "만료시각ms:등급". 등급이 없으면 admin 으로 읽는다 —
+// 이 기능 이전에 발급된 쿠키가 그대로 살아 있어야 하기 때문이다.
+function makeToken(role) {
+  const payload = String(Date.now() + AUTH_MAX_AGE_SEC * 1000) + ':' +
+    (role === ROLE_PRACTICE ? ROLE_PRACTICE : ROLE_ADMIN);
   return payload + '.' + signPayload(payload);
 }
 
+// 유효하면 등급 문자열, 아니면 null 을 돌려준다 (예전에는 boolean 이었다).
 function verifyToken(tok) {
-  if (!tok || typeof tok !== 'string') return false;
+  if (!tok || typeof tok !== 'string') return null;
   const dot = tok.lastIndexOf('.');
-  if (dot < 0) return false;
+  if (dot < 0) return null;
   const payload = tok.slice(0, dot);
   const sig = tok.slice(dot + 1);
   const expected = signPayload(payload);
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  if (!crypto.timingSafeEqual(a, b)) return false; // 서명 검증 (timing-safe)
-  const exp = parseInt(payload, 10);
-  return Number.isFinite(exp) && exp > Date.now(); // 만료 확인
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null; // 서명 검증 (timing-safe)
+
+  const colon = payload.indexOf(':');
+  const expStr = colon < 0 ? payload : payload.slice(0, colon);
+  const role = colon < 0 ? ROLE_ADMIN : payload.slice(colon + 1); // 옛 쿠키 = admin
+  const exp = parseInt(expStr, 10);
+  if (!Number.isFinite(exp) || exp <= Date.now()) return null;    // 만료 확인
+  return role === ROLE_PRACTICE ? ROLE_PRACTICE : ROLE_ADMIN;
 }
 
-function passwordMatches(input) {
-  const pw = String(process.env.ADMIN_PASSWORD || '');
+// 상수시간 비교. 길이가 달라도 같은 시간이 걸리게 한 번은 비교한다.
+function sameSecret(input, secret) {
   const a = Buffer.from(String(input == null ? '' : input));
-  const b = Buffer.from(pw);
+  const b = Buffer.from(String(secret || ''));
+  if (!b.length) return false;
   if (a.length !== b.length) {
-    crypto.timingSafeEqual(b, b); // 길이 불일치도 상수시간 비교 후 실패
+    crypto.timingSafeEqual(b, b);
     return false;
   }
-  return crypto.timingSafeEqual(a, b); // timingSafeEqual 로 비밀번호 비교
+  return crypto.timingSafeEqual(a, b);
+}
+
+/* 입력한 비번이 어느 등급인지. 어느 쪽도 아니면 null.
+   🔴 admin 을 먼저 본다. 두 비번을 같게 설정했다면 높은 쪽을 준다. */
+function roleOfPassword(input) {
+  if (sameSecret(input, process.env.ADMIN_PASSWORD)) return ROLE_ADMIN;
+  if (practiceEnabled() && sameSecret(input, process.env.PRACTICE_PASSWORD)) return ROLE_PRACTICE;
+  return null;
 }
 
 function parseCookies(req) {
@@ -119,8 +148,18 @@ function parseCookies(req) {
   return out;
 }
 
-function isAuthed(req) {
+// 이 요청의 등급. 비번을 안 걸어 둔 환경에서는 모두가 관리자다.
+function roleOf(req) {
+  if (!authEnabled()) return ROLE_ADMIN;
   return verifyToken(parseCookies(req)[AUTH_COOKIE]);
+}
+
+function isAuthed(req) {
+  return Boolean(roleOf(req));
+}
+
+function isAdmin(req) {
+  return roleOf(req) === ROLE_ADMIN;
 }
 
 function cookieString(name, val, maxAgeSec) {
@@ -140,6 +179,24 @@ function requireAuth(req, res, next) {
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, error: '인증이 필요합니다. 설정 페이지에서 로그인하세요.' });
   }
+  return res.redirect('/auth?next=' + encodeURIComponent(req.originalUrl || '/settings'));
+}
+
+/* 관리자 전용. 연습 비번으로 들어온 사람은 '로그인하라' 가 아니라
+   '이 비번으로는 안 된다' 를 봐야 한다 — 로그인 화면으로 돌려보내면
+   같은 비번을 다시 넣고 또 튕기는 것을 반복하게 된다. */
+function requireAdmin(req, res, next) {
+  if (!authEnabled()) return next();
+  if (isAdmin(req)) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(403).json({
+      ok: false,
+      error: isAuthed(req)
+        ? '이 비밀번호로는 설정에 접근할 수 없습니다. 관리자 비밀번호가 필요합니다.'
+        : '인증이 필요합니다. 설정 페이지에서 로그인하세요.',
+    });
+  }
+  if (isAuthed(req)) return res.status(403).send(noAdminPage());
   return res.redirect('/auth?next=' + encodeURIComponent(req.originalUrl || '/settings'));
 }
 
@@ -485,7 +542,7 @@ app.get('/', (req, res) => {
   // 대시보드 자체는 공개라 로그인 안 한 사람도 이 화면을 본다 — 그 사람에게는
   // 버튼을 비활성 톤으로 보여 주고, 눌러도 실패가 아니라 안내가 나가게 한다.
   // 비밀번호를 걸지 않은 로컬에서는 모두가 관리자다(authEnabled() === false).
-  const canRunCheck = !authEnabled() || isAuthed(req);
+  const canRunCheck = isAdmin(req);   // 연습 등급은 수집을 돌릴 수 없다
   const checkIntervalMin = currentInterval || s.intervalMinutes;
 
   // 섹션 자동 우선순위: 오픈일시 확인된 예정 프로그램이 1개 이상이면 플래너를 위로
@@ -947,7 +1004,7 @@ function institutionsSection(s) {
 }
 
 // ---- 페이지: 설정 (보호) ----
-app.get('/settings', requireAuth, (req, res) => {
+app.get('/settings', requireAdmin, (req, res) => {
   const s = storage.getSettings();
 
   const cb = (group, value, label, checked) => `
@@ -1461,8 +1518,13 @@ const PRACTICE_PROGRAMS = [
 
 // 주소 검색 모달용 더미 도로명 주소.
 // 카카오/도로명주소 API 를 쓰지 않는다 — 이 목록 안에서만 필터링한다(외부 통신 없음).
-// 실존 학교 주소가 아니라 형태만 맞춘 가상 주소다.
+//
+// 🔴 첫 항목이 '우리 학교' 다 (PRACTICE_SCHOOL). 회차마다 랜덤으로 뽑던 것을 없앴다 —
+//    실전에서 학교 주소는 늘 같은 하나이고, 매번 다른 주소를 외우는 것은 연습이 아니다.
+//    이 한 건만 실제 검색어가 통하게 두고(주안동로 / 주안동 / 석암초등학교),
+//    나머지는 목록을 훑는 시간을 만들기 위한 배경이다.
 const PRACTICE_ADDRESSES = [
+  { zip: '21556', road: '인천광역시 남동구 주안동로 46', jibun: '주안동 1234 (석암초등학교)' },
   { zip: '06134', road: '서울특별시 강남구 테헤란로 152', jibun: '역삼동 737' },
   { zip: '04524', road: '서울특별시 중구 세종대로 110', jibun: '태평로1가 31' },
   { zip: '07995', road: '서울특별시 양천구 목동동로 375', jibun: '목동 917' },
@@ -1495,16 +1557,19 @@ const PRACTICE_ADDRESSES = [
 ];
 
 // 문제 생성 요소 — 연습 시작마다 랜덤 조합된다.
+// 이번 회차의 '우리 학교' — 목록의 첫 항목으로 고정한다.
+const PRACTICE_SCHOOL = PRACTICE_ADDRESSES[0];
+
 const PRACTICE_QUIZ = {
-  sessions: [8, 12, 16],
+  // 8 또는 12 만 낸다. 16·20 차시는 우리가 신청할 일이 없어 연습할 이유가 없다.
+  sessions: [8, 12],
   // 모집 학년 범위는 초등학교로만 뽑는다 (중·고 범위는 문제로 내지 않는다).
   // grades = 이번 문제에서 체크가 열리는 초등 학년들
+  // 실제로 나오는 세 가지만 낸다 (1~4 / 1~6 / 5~6).
   ranges: [
-    { label: '초등학교 1~6학년 전체', row: 'elem', grades: [1, 2, 3, 4, 5, 6] },
     { label: '초등학교 1~4학년', row: 'elem', grades: [1, 2, 3, 4] },
+    { label: '초등학교 1~6학년 전체', row: 'elem', grades: [1, 2, 3, 4, 5, 6] },
     { label: '초등학교 5~6학년', row: 'elem', grades: [5, 6] },
-    { label: '초등학교 3~6학년', row: 'elem', grades: [3, 4, 5, 6] },
-    { label: '초등학교 1~2학년', row: 'elem', grades: [1, 2] },
   ],
   // 체크박스는 실제 폼과 똑같이 학교급 3행 × 학년별로 놓는다 (초 6 + 중 3 + 고 3 = 12개).
   // 중·고 행은 늘 비활성이지만 지우지 않는다 — 실전에서 그 줄을 건너뛰는
@@ -1534,18 +1599,19 @@ const PRACTICE_QUIZ = {
     '방과후 주중',
     '방과후 주말',
   ],
-  // 실전 요령 연습용 정형문구 (요청사항에 한 번에 붙여넣는다)
-  boilerplate:
-    '– 교육 대상: 본교 재학생 학급 단위\n' +
-    '– 희망 시간대: 정규 수업 종료 후 (교내 협의 완료)\n' +
-    '– 준비물: 노트북·태블릿 교내 보유분 활용 가능\n' +
-    '– 주차: 교내 방문객 주차 가능 (사전 연락 요망)\n' +
-    '– 담당자 연락 가능 시간: 평일 09:00~16:30',
 };
 
 // /settings 와 같은 방식으로 보호한다. ADMIN_PASSWORD 미설정 환경에서는
 // authEnabled() 가 false 라 requireAuth 가 그대로 통과시킨다(로컬 개발 편의 유지).
 app.get('/practice', requireAuth, (req, res) => {
+  /* 지금 어느 열쇠로 들어와 있는지 화면에 적는다 — 연습 비번으로 들어온 사람이
+     설정을 눌러 보고 나서야 '아 그 비번이었지' 하고 아는 일이 없게. */
+  const role = roleOf(req);
+  const roleBadge = authEnabled()
+    ? `<span class="pr-role ${role === ROLE_ADMIN ? 'is-admin' : 'is-practice'}">${
+        role === ROLE_ADMIN ? '관리자' : '연습'}</span>`
+    : '';
+
   res.send(pageShell('신청 연습', `
     <div class="header">
       <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🏃 신청 연습</a>
@@ -1555,6 +1621,7 @@ app.get('/practice', requireAuth, (req, res) => {
     <div class="pr-notice" role="note">
       <span class="pr-notice-ico" aria-hidden="true">🛡️</span>
       <span><b>연습용 화면입니다.</b> 실제 신청과 무관하며 어떤 데이터도 전송되지 않습니다.</span>
+      ${roleBadge}
     </div>
 
     <div class="card">
@@ -1745,7 +1812,8 @@ app.get('/practice', requireAuth, (req, res) => {
             <div class="pf-rowlabel">· 요청사항</div>
             <div class="pf-rowfield">
               <textarea class="pf-in pf-ta" id="pfNote" rows="4" placeholder="운영기관에 전달할 요청사항 (선택 — 비워도 통과)"></textarea>
-              <button type="button" class="pf-btn-sub" id="pfBoiler" style="margin-top:6px;">📋 정형문구 붙여넣기</button>
+              <div class="pf-notehint">※ 특별한 것 없으면 쓰지 마세요. 시간 아깝습니다.</div>
+              <div class="pf-notehint">※ 필요하다면 미리 복사해 두었다가 붙여넣으세요.</div>
             </div>
           </div>
         </div>
@@ -1808,6 +1876,7 @@ app.get('/practice', requireAuth, (req, res) => {
       // 전부 클라이언트에서만 동작한다. 서버·외부로 나가는 요청이 하나도 없다.
       var PROGRAMS = ${JSON.stringify(PRACTICE_PROGRAMS)};
       var ADDRESSES = ${JSON.stringify(PRACTICE_ADDRESSES)};
+      var SCHOOL = ${JSON.stringify(PRACTICE_SCHOOL)};
       var QUIZ = ${JSON.stringify(PRACTICE_QUIZ)};
       // v2: 기록 항목이 '반응시간' 에서 '폼 작성 총시간' 으로 바뀌어 키를 올렸다.
       var STORE_KEY = 'saessak:practice:v2';
@@ -1869,7 +1938,6 @@ app.get('/practice', requireAuth, (req, res) => {
         endM: document.getElementById('pfEndM'),
         opTime: document.getElementById('pfOpTime'),
         note: document.getElementById('pfNote'),
-        boiler: document.getElementById('pfBoiler'),
         agreeAll: document.getElementById('pfAgreeAll'),
         agree1: document.getElementById('pfAgree1'),
         agree2: document.getElementById('pfAgree2'),
@@ -1898,16 +1966,14 @@ app.get('/practice', requireAuth, (req, res) => {
       function randInt(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
 
       // ---- 문제 생성 ----
+      // 인원은 조건별로 갈리지 않는다. 안내문을 '20명 이상' 하나로 고정하고
+      // 20·21·22 를 모두 정답으로 본다 — 실제로 이 셋 중 무엇을 써도 통과한다.
+      // 회차마다 숫자를 바꿔 외우게 만드는 것은 연습이 아니라 암기였다.
       function makeQuiz() {
-        // 인원 상한: 90% 20명, 10% 22~25명 (후자는 안내문에 'N명 이상 모집' 표기)
-        var over = Math.random() < 0.1;
-        var cap = over ? randInt(22, 25) : 20;
         var weekend = Math.random() < 0.5;
         return {
           sessions: rand(QUIZ.sessions),
           range: rand(QUIZ.ranges),
-          cap: cap,
-          capOver: over,
           weekend: weekend,
           opAnswer: weekend ? '방과후 주말' : '방과후 주중',
         };
@@ -1926,7 +1992,7 @@ app.get('/practice', requireAuth, (req, res) => {
           ['프로그램수준', f['프로그램수준'] || '—'],
           ['총교육차시', quiz.sessions + '차시'],
           ['모집 학년 범위', quiz.range.label],
-          ['모집 인원', quiz.capOver ? quiz.cap + '명 이상 모집' : quiz.cap + '명'],
+          ['모집 인원', '20명 이상'],
         ];
         var right = [
           ['프로그램유형', f['프로그램유형'] || '—'],
@@ -2123,15 +2189,12 @@ app.get('/practice', requireAuth, (req, res) => {
           el.edus.appendChild(lab);
         });
 
-        // 신청 인원 옆 빨간 안내문. 상한이 20을 넘는 회차에는 'N명 이상 모집' 을 덧붙여
-        // 정답을 화면 안에서 찾을 수 있게 한다 (실제 화면의 고정 문구 + 이번 회차 정보).
-        el.countWarn.textContent =
-          '※ 20명 이내로 기입(한 학급에 20명 초과일 경우 운영기관과 사전 협의 필요)' +
-          (quiz.capOver ? ' — 이번 프로그램은 ' + quiz.cap + '명 이상 모집' : '');
+        // 신청 인원 안내문 — 회차와 무관하게 늘 같은 문구다.
+        el.countWarn.textContent = '※ 20명 이상';
 
-        // 이번 회차의 '우리 학교 주소' — 주소 검색에서 이걸 찾아 골라야 한다.
-        // 정답이 정해져 있어야 목록을 훑는 시간이 실제로 생긴다.
-        quiz.school = rand(ADDRESSES);
+        // '우리 학교 주소' 는 늘 같다 (랜덤 아님). 실전에서 바뀌지 않는 값이라
+        // 외울 것은 주소가 아니라 '검색해서 고르는 손놀림' 이다.
+        quiz.school = SCHOOL;
         el.schoolAddr.value = quiz.school.road;
         addrWaitMs = 0;
         setAddrStatus('');
@@ -2141,10 +2204,10 @@ app.get('/practice', requireAuth, (req, res) => {
         el.target.value = '';
         el.count.value = ''; el.sessions.value = '';
         el.startDate.value = ''; el.endDate.value = '';
-        // 시·분은 09:00 을 미리 넣어 둔다. 실전에서도 날짜는 승인 후 협의로 조정되니
-        // 여기서 셀렉트를 두 번 여는 시간이 아깝다 — 손대지 않고 넘어가도 통과한다.
-        el.startH.value = '09'; el.startM.value = '00';
-        el.endH.value = '09'; el.endM.value = '00';
+        // 시는 비워 둔다 — 실제 폼이 '시' 를 안 고른 상태로 시작하므로 여기서도 고르게 한다.
+        // 분만 00 으로 채운다 (실제로도 분은 대부분 00 이라 손댈 일이 없다).
+        el.startH.value = ''; el.startM.value = '00';
+        el.endH.value = ''; el.endM.value = '00';
         el.opTime.value = '';
         el.note.value = '';
         el.agreeAll.checked = false; el.agree1.checked = false; el.agree2.checked = false;
@@ -2232,13 +2295,27 @@ app.get('/practice', requireAuth, (req, res) => {
         return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
       }
 
+      // 검색어가 주소의 어느 조각에라도 걸리면 결과로 본다.
+      // 도로명('주안동로') · 지역명('주안') · 건물명('석암초등학교') · 우편번호 어느 것으로 쳐도
+      // 걸려야 한다. 예전에는 조각을 통째로만 비교해서 '주안' 을 쳐도 0건이 나왔다.
+      function addrMatch(a, term) {
+        var hay = (a.road + ' ' + a.jibun + ' ' + a.zip).replace(/\s+/g, '');
+        var needle = term.replace(/\s+/g, '');
+        if (!needle) return false;
+        if (hay.indexOf(needle) >= 0) return true;
+        // 띄어쓰기로 나눠 친 경우 — 조각이 전부 걸리면 맞는 것으로 본다 ('남동구 주안동')
+        var parts = term.split(/\s+/).filter(Boolean);
+        if (parts.length < 2) return false;
+        for (var i = 0; i < parts.length; i++) if (hay.indexOf(parts[i]) < 0) return false;
+        return true;
+      }
+
       // 검색 결과 만들기: 검색어에 걸리는 항목 + (모자라면) 다른 항목으로 6~10건을 채우고
       // 섞는다. 정답이 늘 첫 줄에 오면 목록을 훑을 이유가 없어져 연습이 되지 않는다.
       function buildResults(term) {
         var hit = [], rest = [];
         ADDRESSES.forEach(function (a) {
-          var m = a.road.indexOf(term) >= 0 || a.jibun.indexOf(term) >= 0 || a.zip.indexOf(term) >= 0;
-          (m ? hit : rest).push(a);
+          (addrMatch(a, term) ? hit : rest).push(a);
         });
         if (!hit.length) return [];
         var want = randInt(ADDR_RESULT_MIN, ADDR_RESULT_MAX);
@@ -2263,11 +2340,15 @@ app.get('/practice', requireAuth, (req, res) => {
         el.results.innerHTML = '<div class="pf-results-ph pf-loading">검색 중…</div>';
         afterDelay(ADDR_DELAY.search, function () {
           var list = buildResults(term);
+          var note = '';
           if (!list.length) {
-            el.results.innerHTML = '<div class="pf-results-ph">검색 결과가 없습니다. (연습용 더미 목록)</div>';
-            return;
+            /* 🔴 0건에서 멈추면 연습이 거기서 끝난다 — 실제 사이트와 달리 이 목록은
+               몇 건뿐이라 못 찾는 게 정상이다. 안내를 붙이고 전체 목록을 그대로 편다. */
+            note = '<div class="pf-results-note">연습용 더미 목록이라 일부 주소만 나옵니다. ' +
+              '아래 목록에서 고르세요.</div>';
+            list = ADDRESSES.slice();
           }
-          el.results.innerHTML = list.map(function (a) {
+          el.results.innerHTML = note + list.map(function (a) {
             return '<button type="button" class="pf-result" data-road="' + escAttr(a.road) + '">' +
               '<span class="pf-zip">' + a.zip + '</span>' +
               '<span class="pf-road">' + a.road + '</span>' +
@@ -2338,12 +2419,6 @@ app.get('/practice', requireAuth, (req, res) => {
       }
       attachDigitEntry(el.startDate);
       attachDigitEntry(el.endDate);
-
-      // ---- 정형문구 ----
-      el.boiler.addEventListener('click', function () {
-        el.note.value = ${JSON.stringify(PRACTICE_QUIZ.boilerplate)};
-        el.note.focus();
-      });
 
       // ---- 전체동의 ----
       el.agreeAll.addEventListener('change', function () {
@@ -2424,8 +2499,9 @@ app.get('/practice', requireAuth, (req, res) => {
             fail(el.edus, '해당 학교가 신청할 수 없는 대상입니다');
           }
         }
-        if (Number(el.count.value) !== quiz.cap) {
-          fail(el.count, '신청 인원이 다릅니다 (정답: ' + quiz.cap + '명)');
+        // 20·21·22 셋 다 통과 (분기 없음)
+        if ([20, 21, 22].indexOf(Number(el.count.value)) < 0) {
+          fail(el.count, '신청 인원을 확인하세요 (20 · 21 · 22 중 하나)');
         }
         if (Number(el.sessions.value) !== quiz.sessions) {
           fail(el.sessions, '총 교육 차시가 다릅니다 (정답: ' + quiz.sessions + '차시)');
@@ -2682,17 +2758,45 @@ app.get('/practice', requireAuth, (req, res) => {
   `));
 });
 
+/* ---- 페이지: 연습 비번으로 설정에 들어오려 했을 때 ----
+   로그인 화면으로 돌려보내지 않는다. 같은 비번을 다시 넣고 또 튕기는 것을 반복하게 된다. */
+function noAdminPage() {
+  return pageShell('접근 불가', `
+    <div class="header">
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🔒 접근 불가</a>
+      ${navTabs(null)}
+    </div>
+    <div class="card" style="max-width:460px;">
+      <div class="card-title">이 비밀번호로는 설정에 접근할 수 없습니다</div>
+      <div class="muted small" style="margin:8px 0 14px;line-height:1.7;">
+        지금 로그인한 것은 <b>연습 전용 비밀번호</b>입니다.
+        감시 조건 설정과 수집 실행은 관리자 비밀번호가 필요합니다.<br>
+        🏃 신청 연습은 그대로 쓸 수 있습니다.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <a class="btn btn-green" href="/practice">🏃 신청 연습으로</a>
+        <a class="btn" href="/">← 대시보드</a>
+      </div>
+    </div>
+  `);
+}
+
 // ---- 페이지: 비밀번호 입력 (로그인) ----
 function authPage(next, failed) {
   const nextVal = safeNext(next);
-  return pageShell('설정 로그인', `
+  const forPractice = safeNext(next) === '/practice';
+  return pageShell('로그인', `
     <div class="header">
-      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🔒 설정 로그인</a>
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🔒 로그인</a>
       <a class="navlink" href="/">← 대시보드</a>
     </div>
     <form method="POST" action="/auth" class="card" style="max-width:420px;">
-      <div class="card-title">관리자 비밀번호</div>
-      <div class="muted small" style="margin-bottom:12px;">감시 조건 설정과 알림 발송은 비밀번호로 보호됩니다.</div>
+      <div class="card-title">${forPractice && practiceEnabled() ? '비밀번호' : '관리자 비밀번호'}</div>
+      <div class="muted small" style="margin-bottom:12px;">${
+        practiceEnabled()
+          ? '관리자 비밀번호는 모든 화면, 연습 비밀번호는 🏃 신청 연습만 열립니다.'
+          : '감시 조건 설정과 알림 발송은 비밀번호로 보호됩니다.'
+      }</div>
       ${failed ? '<div class="err card" style="margin:0 0 12px;padding:10px 14px;">비밀번호가 올바르지 않습니다.</div>' : ''}
       <input type="hidden" name="next" value="${escapeHtml(nextVal)}">
       <input type="password" name="password" autofocus required
@@ -2711,15 +2815,21 @@ app.get('/auth', (req, res) => {
 app.post('/auth', (req, res) => {
   if (!authEnabled()) return res.redirect('/settings');
   const body = req.body || {};
-  if (passwordMatches(body.password)) {
-    res.setHeader('Set-Cookie', cookieString(AUTH_COOKIE, makeToken(), AUTH_MAX_AGE_SEC));
-    return res.redirect(safeNext(body.next));
+  const role = roleOfPassword(body.password);
+  if (role) {
+    res.setHeader('Set-Cookie', cookieString(AUTH_COOKIE, makeToken(role), AUTH_MAX_AGE_SEC));
+    // 연습 비번으로 설정에 가려던 사람은 연습 화면으로 보낸다 (거기서 또 튕기지 않게)
+    const want = safeNext(body.next);
+    if (role === ROLE_PRACTICE && want !== '/practice' && want !== '/') {
+      return res.redirect('/practice');
+    }
+    return res.redirect(want);
   }
   res.status(401).send(authPage(body.next, true));
 });
 
 // ---- API ----
-app.post('/api/settings', requireAuth, (req, res) => {
+app.post('/api/settings', requireAdmin, (req, res) => {
   try {
     const saved = storage.saveSettings(req.body || {});
     rescheduleIfChanged();
@@ -2730,7 +2840,7 @@ app.post('/api/settings', requireAuth, (req, res) => {
 });
 
 // ---- 기관 평가 API ----
-app.get('/api/institutions', requireAuth, (req, res) => {
+app.get('/api/institutions', requireAdmin, (req, res) => {
   try {
     res.json({ ok: true, institutions: storage.getInstitutions() });
   } catch (err) {
@@ -2739,7 +2849,7 @@ app.get('/api/institutions', requireAuth, (req, res) => {
 });
 
 // 기관 1건 저장. 이름은 경로에 담는다(한글이므로 클라이언트에서 encodeURIComponent).
-app.post('/api/institutions/:name', requireAuth, (req, res) => {
+app.post('/api/institutions/:name', requireAdmin, (req, res) => {
   try {
     const saved = storage.saveInstitution(req.params.name, req.body || {});
     invalidateInstitutions(); // 표식 캐시 갱신
@@ -2749,7 +2859,7 @@ app.post('/api/institutions/:name', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/check-now', requireAuth, async (req, res) => {
+app.post('/api/check-now', requireAdmin, async (req, res) => {
   try {
     // 수동 확인도 동일 락을 통과 → 정기 수집과 겹쳐 chromium 이 중복 launch 되지 않음.
     // 이미 돌고 있으면 거부하지 않고 예약한다({ queued: true }) — 화면은 이것을
@@ -2761,7 +2871,7 @@ app.post('/api/check-now', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/test-alert', requireAuth, async (req, res) => {
+app.post('/api/test-alert', requireAdmin, async (req, res) => {
   try {
     const result = await sendTestAlert();
     res.json(result);
@@ -4168,6 +4278,16 @@ function pageShell(title, body) {
   .pf-in-num { max-width:110px; }
   .pf-ta { resize:vertical; line-height:1.5; }
   .pf-bad { border-color:#d9534f !important; background:#fdeaea !important; }
+  /* 지금 어느 비밀번호로 들어와 있는지 (관리자 / 연습) */
+  .pr-role{margin-left:auto;flex:none;font-size:11px;font-weight:800;line-height:1;
+    padding:4px 9px;border-radius:999px;white-space:nowrap}
+  .pr-role.is-admin{background:#e6f1fb;color:#0c447c}
+  .pr-role.is-practice{background:#f1efe8;color:#5c5a52}
+  /* 요청사항 아래 회색 안내문 — 안 써도 된다는 것을 화면에서 말해 준다 */
+  .pf-notehint{font-size:11.5px;color:#9a9a94;line-height:1.65;margin-top:5px}
+  /* 검색 0건일 때 전체 목록 위에 붙는 안내 */
+  .pf-results-note{padding:9px 11px;font-size:11.5px;line-height:1.6;color:#8a6d1f;
+    background:#fdf6e3;border-bottom:1px solid #efe4c4}
   /* 보조 버튼 (주소 검색·오늘·정형문구) — 각진 회색 */
   .pf-btn-sub { font:inherit; font-size:13px; font-weight:600; padding:9px 13px; cursor:pointer;
     background:#e9e9e9; color:#333; border:1px solid var(--pf-border); border-radius:2px;
