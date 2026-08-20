@@ -509,7 +509,7 @@ app.get('/', (req, res) => {
       <!-- 이미 대시보드다 → 눌러도 이동이 아니라 새로고침. href 는 그대로 두어
            JS 가 죽어도, 새 탭으로 열어도 대시보드로 가게 한다. -->
       <a class="logo" href="/" id="logoHome" title="새로고침" aria-label="대시보드 새로고침">🌱 새싹 레이더</a>
-      <a class="navlink" href="/settings">⚙️ 설정</a>
+      ${navTabs('home')}
     </div>
 
     <div class="statusbar">
@@ -899,7 +899,7 @@ app.get('/settings', requireAuth, (req, res) => {
   res.send(pageShell('감시 조건 설정', `
     <div class="header">
       <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🌱 감시 조건 설정</a>
-      <a class="navlink" href="/">← 대시보드</a>
+      ${navTabs('settings')}
     </div>
 
     <div class="card" style="border-left:3px solid #2f855a;">
@@ -1321,6 +1321,351 @@ app.get('/settings', requireAuth, (req, res) => {
           msg.textContent = '오류: ' + err.message;
         }
       });
+    </script>
+  `));
+});
+
+// ============ 페이지: 신청 연습 (연습 전용) ============
+//
+// 원칙 — 이 화면은 실제 디지털새싹 사이트와 어떤 통신도 하지 않는다.
+//  · 외부 도메인으로의 fetch / iframe / 링크 없음 (아래 프로그램은 전부 가상)
+//  · 사용자가 넣는 값은 서버로 보내지 않는다. 채점도 기록도 브라우저 안에서만 한다.
+//  · 목적은 신청 폼 작성 '속도를 스스로 연습' 하는 것이다 (타자 연습장과 같은 성격).
+//    제출 자동화 도구가 아니며, 그렇게 쓰일 수 있는 경로를 만들지 않는다.
+//
+// 더미 프로그램: 기관·프로그램명 모두 가상이다. 실제 공고와 헷갈리지 않도록
+// 실존 기관명을 쓰지 않는다.
+const PRACTICE_PROGRAMS = [
+  {
+    id: 'p1',
+    title: '한여름 밤의 AI 별자리 관측단',
+    institution: '가상새싹연구소 (예시)',
+    fields: {
+      신청기간: '2026-09-01(화) 10:00 ~ 2026-09-12(금) 17:00',
+      교육기간: '2026-10-05(월) ~ 2026-11-27(금)',
+      교육대상: '초등학교 4~6학년',
+      프로그램수준: '기본',
+      프로그램소양: 'AI 리터러시',
+      총교육차시: '12차시 (주 1회 2차시)',
+      교육장소: '신청 학교 교실 (방문형)',
+      운영권역: '서울·인천권',
+      신청대상: '학급 단위 신청 (담임교사)',
+      모집학급: '18학급',
+    },
+  },
+  {
+    id: 'p2',
+    title: '우리 마을 데이터 탐정단',
+    institution: '예시교육협동조합 (가상)',
+    fields: {
+      신청기간: '2026-09-03(목) 09:00 ~ 2026-09-19(금) 18:00',
+      교육기간: '2026-10-12(월) ~ 2026-12-04(금)',
+      교육대상: '중학교 1~3학년',
+      프로그램수준: '특화',
+      프로그램소양: '데이터 과학 · 문제해결',
+      총교육차시: '16차시 (주 2회 2차시)',
+      교육장소: '운영기관 실습실 (집합형)',
+      운영권역: '경기권',
+      신청대상: '학급 단위 신청 (교과 담당교사)',
+      모집학급: '10학급',
+    },
+  },
+  {
+    id: 'p3',
+    title: '로봇 팔로 배우는 자동화 원리',
+    institution: '샘플과학교육센터 (가상)',
+    fields: {
+      신청기간: '2026-09-07(월) 14:00 ~ 2026-09-25(목) 17:00',
+      교육기간: '2026-10-19(월) ~ 2026-12-11(금)',
+      교육대상: '초등학교 5~6학년 / 중학교 1학년',
+      프로그램수준: 'AI 특화',
+      프로그램소양: '피지컬 컴퓨팅',
+      총교육차시: '20차시 (주 2회 2차시)',
+      교육장소: '신청 학교 과학실 (방문형)',
+      운영권역: '강원·충청권',
+      신청대상: '학급 단위 신청 (담임 또는 교과교사)',
+      모집학급: '24학급',
+    },
+  },
+];
+
+app.get('/practice', (req, res) => {
+  res.send(pageShell('신청 연습', `
+    <div class="header">
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🏃 신청 연습</a>
+      ${navTabs('practice')}
+    </div>
+
+    <div class="pr-notice" role="note">
+      <span class="pr-notice-ico" aria-hidden="true">🛡️</span>
+      <span><b>연습용 화면입니다.</b> 실제 신청과 무관하며 어떤 데이터도 전송되지 않습니다.</span>
+    </div>
+
+    <div class="card">
+      <div class="row-between">
+        <div class="card-title" style="margin-bottom:0;">연습 진행</div>
+        <button id="prStart" class="btn btn-green btn-sm">연습 시작</button>
+      </div>
+      <div id="prStatus" class="pr-status">
+        <b>대기 중</b> — [연습 시작] 을 누르면 모집 상태가 <b>모집 중</b> 으로 바뀝니다.
+        바뀌는 즉시 아래 <b>신청하기</b> 를 누르세요.
+      </div>
+      <div id="prResult" class="pr-result" hidden></div>
+    </div>
+
+    <div class="card pr-card">
+      <div class="pr-detail">
+        <!-- 썸네일 자리: 실제 이미지를 쓰지 않는다 (외부 리소스 요청 금지) -->
+        <div class="pr-thumb" id="prThumb" aria-hidden="true">
+          <span class="pr-thumb-tag">이미지 자리</span>
+          <span class="pr-thumb-name" id="prThumbName"></span>
+        </div>
+        <div class="pr-main">
+          <span class="pr-badge pr-badge-soon" id="prBadge">모집 예정</span>
+          <h2 class="pr-title" id="prTitle">—</h2>
+          <div class="pr-inst" id="prInst">—</div>
+          <dl class="pr-table" id="prTable"></dl>
+        </div>
+      </div>
+
+      <div class="pr-apply-wrap">
+        <!-- disabled 속성 대신 aria-disabled 를 쓴다: 진짜 disabled 면 클릭 이벤트가
+             오지 않아 '헛클릭' 을 셀 수 없다. 동작은 JS 에서 막는다. -->
+        <button id="prApply" class="pr-apply is-locked" aria-disabled="true">신청하기</button>
+        <div id="prApplyMsg" class="pr-applymsg" role="status"></div>
+      </div>
+    </div>
+
+    <div class="card" id="prFormCard" hidden>
+      <div class="card-title">신청 폼</div>
+      <div class="pr-formph">
+        <div class="pr-formph-ico" aria-hidden="true">📝</div>
+        <div>
+          <b>폼 준비 중</b>
+          <div class="muted small" style="margin-top:4px;">
+            신청 폼 항목은 다음 단계에서 추가됩니다. 입력값은 서버로 보내지 않고
+            브라우저 안에서만 채점합니다.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row-between">
+        <div class="card-title" style="margin-bottom:0;">📊 내 기록 <span class="muted small">(최근 10회)</span></div>
+        <button id="prReset" class="btn btn-sm btn-ghost">기록 초기화</button>
+      </div>
+      <div class="pr-best" id="prBest"></div>
+      <div class="pr-reclist" id="prRecords"></div>
+    </div>
+
+    <script>
+      // ============ 신청 연습 ============
+      // 전부 클라이언트에서만 동작한다. 서버·외부로 나가는 요청이 하나도 없다.
+      var PROGRAMS = ${JSON.stringify(PRACTICE_PROGRAMS)};
+      var STORE_KEY = 'saessak:practice:v1';
+      var MAX_RECORDS = 10;
+
+      var el = {
+        start: document.getElementById('prStart'),
+        status: document.getElementById('prStatus'),
+        result: document.getElementById('prResult'),
+        badge: document.getElementById('prBadge'),
+        title: document.getElementById('prTitle'),
+        inst: document.getElementById('prInst'),
+        table: document.getElementById('prTable'),
+        thumbName: document.getElementById('prThumbName'),
+        apply: document.getElementById('prApply'),
+        applyMsg: document.getElementById('prApplyMsg'),
+        formCard: document.getElementById('prFormCard'),
+        best: document.getElementById('prBest'),
+        records: document.getElementById('prRecords'),
+        reset: document.getElementById('prReset'),
+      };
+
+      // ---- 상태 ----
+      var phase = 'idle';   // 'idle' | 'open' | 'done'
+      var openedAt = 0;     // 모집 중으로 바뀐 시각 (performance.now)
+      var missCount = 0;    // 헛클릭 (열리기 전 클릭)
+      var current = null;
+
+      // ---- 저장소 (localStorage 전용) ----
+      // best 는 records 와 따로 둔다. 목록은 최근 10회만 남기므로, 최고기록을
+      // 목록에서 계산하면 좋은 기록이 목록 밖으로 밀릴 때 최고기록이 되레 나빠진다.
+      function load() {
+        try {
+          var raw = localStorage.getItem(STORE_KEY);
+          if (!raw) return { best: null, records: [] };
+          var d = JSON.parse(raw);
+          var records = Array.isArray(d.records) ? d.records : [];
+          var best = typeof d.best === 'number' ? d.best : minOf(records); // 구 저장본 보정
+          var total = typeof d.total === 'number' ? d.total : records.length;
+          return { best: best, total: total, records: records };
+        } catch (_) { return { best: null, total: 0, records: [] }; }
+      }
+      function save(d) {
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch (_) { /* 저장 불가 시 이번 회차만 표시 */ }
+      }
+      function minOf(records) {
+        return records.reduce(function (m, r) {
+          return (m == null || r.ms < m) ? r.ms : m;
+        }, null);
+      }
+
+      // ---- 프로그램 렌더 ----
+      function pickProgram() {
+        return PROGRAMS[Math.floor(Math.random() * PROGRAMS.length)];
+      }
+      function renderProgram(p) {
+        current = p;
+        el.title.textContent = p.title;
+        el.inst.textContent = p.institution;
+        el.thumbName.textContent = p.title;
+        el.table.innerHTML = '';
+        Object.keys(p.fields).forEach(function (k) {
+          var dt = document.createElement('dt');
+          dt.textContent = k;
+          var dd = document.createElement('dd');
+          dd.textContent = p.fields[k];
+          el.table.appendChild(dt);
+          el.table.appendChild(dd);
+        });
+      }
+
+      // ---- 화면 상태 ----
+      function setPhase(next) {
+        phase = next;
+        if (next === 'idle') {
+          el.badge.textContent = '모집 예정';
+          el.badge.className = 'pr-badge pr-badge-soon';
+          el.apply.classList.add('is-locked');
+          el.apply.setAttribute('aria-disabled', 'true');
+          el.formCard.hidden = true;
+          el.applyMsg.textContent = '';
+          el.applyMsg.className = 'pr-applymsg';
+        } else if (next === 'open') {
+          el.badge.textContent = '모집 중';
+          el.badge.className = 'pr-badge pr-badge-open';
+          el.apply.classList.remove('is-locked');
+          el.apply.setAttribute('aria-disabled', 'false');
+          el.applyMsg.textContent = '';
+          el.applyMsg.className = 'pr-applymsg';
+        } else if (next === 'done') {
+          // 신청을 마친 상태. 뱃지는 '모집 중' 그대로 두되(실제 사이트도 그렇다)
+          // 버튼은 다시 잠근다 — 활성처럼 보이는데 누르면 헛클릭이 오르는 걸 막는다.
+          el.apply.classList.add('is-locked');
+          el.apply.setAttribute('aria-disabled', 'true');
+        }
+      }
+
+      function setStatus(html) { el.status.innerHTML = html; }
+
+      // ---- 연습 시작 ----
+      el.start.addEventListener('click', function () {
+        renderProgram(pickProgram());
+        // missCount 는 여기서 지우지 않는다. 버튼이 잠겨 있는 구간은 '연습 시작' 이전이라,
+        // 여기서 리셋하면 헛클릭이 어느 회차에도 기록되지 못한다. 기다리는 동안의
+        // 헛클릭은 뒤이은 회차의 것으로 본다 (기록 후 recordRun 에서 0으로 되돌린다).
+        el.result.hidden = true;
+        setPhase('open');
+        setStatus('<b class="pr-open">모집 중으로 열렸습니다!</b> — 지금 <b>신청하기</b> 를 누르세요.');
+        el.start.textContent = '다시 연습';
+        openedAt = performance.now();
+        el.apply.focus({ preventScroll: true });
+      });
+
+      // ---- 신청하기 ----
+      el.apply.addEventListener('click', function () {
+        if (phase === 'done') {
+          // 이미 신청을 마쳤다. 조급해서 누른 게 아니므로 헛클릭으로 세지 않는다.
+          el.applyMsg.textContent = '이미 신청했습니다 — [다시 연습] 을 누르세요';
+          el.applyMsg.className = 'pr-applymsg';
+          return;
+        }
+        if (phase !== 'open') {
+          // 열리기 전 클릭 = 헛클릭
+          missCount += 1;
+          el.applyMsg.textContent = '아직 열리지 않았습니다 (헛클릭 ' + missCount + '회)';
+          el.applyMsg.className = 'pr-applymsg pr-applymsg-warn';
+          return;
+        }
+        var ms = Math.round(performance.now() - openedAt);
+        setPhase('done');
+        recordRun(ms, missCount);
+        el.formCard.hidden = false;
+        el.formCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+
+      // ---- 기록 ----
+      function recordRun(ms, miss) {
+        var d = load();
+        var prevBest = d.best;
+        var isBest = prevBest == null || ms < prevBest;
+
+        d.records.unshift({ at: new Date().toISOString(), ms: ms, miss: miss });
+        d.records = d.records.slice(0, MAX_RECORDS);
+        d.total = (d.total || 0) + 1;
+        if (isBest) d.best = ms;
+        save(d);
+        missCount = 0; // 이번 회차에 반영했으므로 초기화
+
+        el.result.hidden = false;
+        el.result.className = 'pr-result' + (isBest ? ' pr-result-best' : '');
+        el.result.innerHTML =
+          '<span class="pr-ms">' + ms + '<span class="pr-ms-u">ms</span></span>' +
+          (isBest ? '<span class="pr-besttag">🏆 개인 최고기록!</span>' : '') +
+          (miss ? '<span class="pr-misstag">헛클릭 ' + miss + '회</span>' : '') +
+          (!isBest && prevBest != null
+            ? '<span class="muted small">최고기록 ' + prevBest + 'ms</span>'
+            : '');
+        setStatus('기록됐습니다. [다시 연습] 을 누르면 새 프로그램으로 이어서 연습합니다.');
+        renderRecords();
+      }
+
+      function fmtWhen(iso) {
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return '—';
+        var p = function (n) { return String(n).padStart(2, '0'); };
+        return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+      }
+
+      function renderRecords() {
+        var d = load();
+        var best = d.best;
+
+        el.best.innerHTML = best == null
+          ? '<span class="muted small">아직 기록이 없습니다.</span>'
+          : '개인 최고기록 <b class="pr-bestnum">' + best + 'ms</b>' +
+            ' <span class="muted small">· 누적 ' + (d.total || d.records.length) + '회</span>';
+
+        if (!d.records.length) {
+          el.records.innerHTML = '<div class="muted small" style="padding:10px 0;">연습을 한 번 해 보세요.</div>';
+          return;
+        }
+        el.records.innerHTML =
+          '<div class="pr-rechead"><span>일시</span><span>반응시간</span><span>헛클릭</span></div>' +
+          d.records.map(function (r) {
+            var isBest = r.ms === best;
+            return '<div class="pr-recrow' + (isBest ? ' pr-recrow-best' : '') + '">' +
+              '<span class="pr-recwhen">' + fmtWhen(r.at) + '</span>' +
+              '<span class="pr-recms">' + r.ms + 'ms' + (isBest ? ' 🏆' : '') + '</span>' +
+              '<span class="pr-recmiss">' + (r.miss ? r.miss + '회' : '—') + '</span>' +
+              '</div>';
+          }).join('');
+      }
+
+      el.reset.addEventListener('click', function () {
+        save({ best: null, records: [] });
+        missCount = 0;
+        el.result.hidden = true;
+        renderRecords();
+        saessak.toast('기록을 초기화했습니다');
+      });
+
+      // ---- 초기화 ----
+      renderProgram(pickProgram());
+      setPhase('idle');
+      renderRecords();
     </script>
   `));
 });
@@ -2224,6 +2569,24 @@ function renderPlanner() {
   return { html, openReady };
 }
 
+// ---- 상단 탭 ----
+// active: 'home' | 'practice' | 'settings' | null
+function navTabs(active) {
+  const tabs = [
+    { key: 'home', href: '/', label: '🌱 대시보드' },
+    { key: 'practice', href: '/practice', label: '🏃 신청 연습' },
+    { key: 'settings', href: '/settings', label: '⚙️ 설정' },
+  ];
+  return `<nav class="navlinks">${tabs
+    .map(
+      (t) =>
+        `<a class="navlink${t.key === active ? ' on' : ''}" href="${t.href}"${
+          t.key === active ? ' aria-current="page"' : ''
+        }>${t.label}</a>`
+    )
+    .join('')}</nav>`;
+}
+
 function pageShell(title, body) {
   return `<!doctype html>
 <html lang="ko">
@@ -2306,8 +2669,20 @@ function pageShell(title, body) {
     a.logo:active { transform:none; }
   }
   .navlink { color:var(--green-d); text-decoration:none; font-weight:600; font-size:14px;
-    background:var(--surface-2); padding:8px 12px; border-radius:10px; border:1px solid var(--line); }
+    background:var(--surface-2); padding:8px 12px; border-radius:10px; border:1px solid var(--line);
+    white-space:nowrap; }
   .navlink:hover { background:var(--surface-1); }
+  /* 상단 탭 묶음 — 좁은 화면에서는 제목 아래로 접힌다 */
+  .navlinks { display:flex; align-items:center; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+  .navlink.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); }
+  @media (prefers-color-scheme: dark) {
+    .navlink.on { background:#17301f; border-color:#2b5c3c; }
+  }
+  @media (max-width:420px) {
+    .header { flex-wrap:wrap; gap:9px; }
+    .navlinks { width:100%; justify-content:flex-start; }
+    .navlink { font-size:13px; padding:7px 10px; }
+  }
   .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:14px; }
   .card { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; }
   .card-title { font-weight:700; font-size:15px; margin-bottom:9px; }
@@ -2582,6 +2957,100 @@ function pageShell(title, body) {
   .dl-bad { color:#d9534f; }
   .dl-off { color:var(--text-muted); }
   .dl-bad-t { color:#d9534f; }
+  /* ================= 신청 연습 ================= */
+  /* 상단 고정 안내 — 스크롤해도 '연습용' 이라는 사실이 화면에서 사라지지 않게 한다 */
+  .pr-notice { position:sticky; top:0; z-index:20; display:flex; align-items:center; gap:9px;
+    background:#fff6e6; color:#7a5200; border:1px solid #f0dcae; border-radius:12px;
+    padding:11px 14px; margin-bottom:13px; font-size:13px; line-height:1.45; }
+  .pr-notice-ico { font-size:16px; flex-shrink:0; }
+  .btn-ghost { background:var(--surface-1); color:var(--text-secondary); border:1px solid var(--line); }
+  .btn-ghost:hover { background:var(--surface-2); }
+  .pr-status { font-size:13px; color:var(--text-secondary); margin-top:9px; line-height:1.5; }
+  .pr-open { color:var(--green-d); }
+  .pr-result { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:11px;
+    padding:11px 13px; border-radius:11px; background:var(--surface-1); border:1px solid var(--line); }
+  .pr-result-best { background:#eaf6ef; border-color:#bfe4cd; }
+  .pr-ms { font-size:26px; font-weight:800; color:var(--green-d); letter-spacing:-0.02em; }
+  .pr-ms-u { font-size:14px; font-weight:700; margin-left:2px; }
+  .pr-besttag { font-size:12px; font-weight:800; color:#8a5a08; background:#fbeed5;
+    padding:4px 9px; border-radius:999px; }
+  .pr-misstag { font-size:12px; font-weight:700; color:#a33; background:#fdeaea;
+    padding:4px 9px; border-radius:999px; }
+  /* ---- 프로그램 상세 재현 ---- */
+  .pr-card { padding:16px; }
+  .pr-detail { display:grid; grid-template-columns:132px 1fr; gap:15px; align-items:start; }
+  .pr-thumb { aspect-ratio:4/3; border-radius:11px; background:var(--surface-1);
+    border:1px dashed var(--line); display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:6px; padding:9px; text-align:center; overflow:hidden; }
+  .pr-thumb-tag { font-size:10px; font-weight:700; color:var(--text-muted); letter-spacing:.04em; }
+  .pr-thumb-name { font-size:12px; font-weight:700; color:var(--text-secondary); line-height:1.35;
+    overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
+  .pr-main { min-width:0; }
+  .pr-badge { display:inline-block; font-size:11px; font-weight:800; padding:4px 10px;
+    border-radius:999px; margin-bottom:7px; }
+  .pr-badge-soon { background:#eef0f2; color:#7a848c; }
+  .pr-badge-open { background:#eaf6ef; color:var(--green-d); }
+  .pr-title { font-size:17px; font-weight:800; margin:0 0 3px; line-height:1.35;
+    letter-spacing:-0.01em; overflow-wrap:anywhere; }
+  .pr-inst { font-size:13px; color:var(--text-secondary); margin-bottom:11px; overflow-wrap:anywhere; }
+  .pr-table { display:grid; grid-template-columns:92px 1fr; gap:0; margin:0;
+    border-top:1px solid var(--line); }
+  .pr-table dt { font-size:12px; font-weight:700; color:var(--text-secondary);
+    padding:8px 9px 8px 0; border-bottom:1px solid var(--line); }
+  .pr-table dd { font-size:13px; margin:0; padding:8px 0; border-bottom:1px solid var(--line);
+    overflow-wrap:anywhere; }
+  /* ---- 신청하기 ---- */
+  .pr-apply-wrap { margin-top:16px; }
+  .pr-apply { width:100%; border:none; border-radius:12px; padding:16px; font-size:16px;
+    font-weight:800; cursor:pointer; background:var(--green); color:#fff;
+    transition:background .12s, opacity .12s; }
+  .pr-apply:hover { background:var(--green-d); }
+  .pr-apply:focus-visible { outline:2px solid var(--green-d); outline-offset:2px; }
+  /* 비활성 — 진짜 disabled 가 아니라 잠금 상태다 (헛클릭을 세야 하므로) */
+  .pr-apply.is-locked { background:var(--surface-1); color:var(--text-muted);
+    border:1px solid var(--line); cursor:not-allowed; }
+  .pr-apply.is-locked:hover { background:var(--surface-1); }
+  .pr-applymsg { min-height:18px; margin-top:7px; font-size:12px; text-align:center; }
+  .pr-applymsg-warn { color:#a33; font-weight:700; }
+  .pr-formph { display:flex; align-items:flex-start; gap:12px; padding:16px;
+    border:1px dashed var(--line); border-radius:11px; background:var(--surface-1); }
+  .pr-formph-ico { font-size:22px; line-height:1; }
+  /* ---- 기록 ---- */
+  .pr-best { font-size:13px; margin:11px 0 9px; }
+  .pr-bestnum { color:var(--green-d); font-size:15px; }
+  .pr-rechead, .pr-recrow { display:grid; grid-template-columns:1fr 96px 72px; gap:9px;
+    align-items:center; }
+  .pr-rechead { font-size:11px; font-weight:800; color:var(--text-muted);
+    border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .pr-recrow { font-size:13px; padding:8px 0; border-top:1px solid var(--line); }
+  .pr-recrow:first-of-type { border-top:none; }
+  .pr-recrow-best { font-weight:700; }
+  .pr-recwhen { color:var(--text-secondary); font-size:12px; }
+  .pr-recms { font-weight:700; }
+  .pr-recrow-best .pr-recms { color:var(--green-d); }
+  .pr-recmiss { color:var(--text-muted); font-size:12px; }
+  .pr-rechead span:not(:first-child), .pr-recrow span:not(:first-child) { text-align:right; }
+  @media (prefers-color-scheme: dark) {
+    .pr-notice { background:#2a2416; color:#e8d7ab; border-color:#4a3f22; }
+    .pr-besttag { background:#3a2f14; color:#f0d79a; }
+    .pr-misstag { background:#3a1f1f; color:#f0b4b4; }
+    .pr-result-best { background:#17301f; border-color:#2b5c3c; }
+    .pr-badge-soon { background:#2a3230; color:#9aa8a0; }
+    .pr-badge-open { background:#17301f; color:#7fd3a3; }
+  }
+  /* 375px 대응 — 썸네일을 위로 올리고 표를 2줄 구조로 좁힌다 */
+  @media (max-width:480px) {
+    .pr-detail { grid-template-columns:1fr; gap:12px; }
+    .pr-thumb { aspect-ratio:16/7; flex-direction:row; gap:9px; }
+    .pr-thumb-name { -webkit-line-clamp:2; }
+    .pr-table { grid-template-columns:80px 1fr; }
+    .pr-table dt { font-size:11px; padding-right:7px; }
+    .pr-table dd { font-size:12px; }
+    .pr-card { padding:13px; }
+    .pr-apply { font-size:15px; padding:15px; }
+    .pr-ms { font-size:23px; }
+    .pr-rechead, .pr-recrow { grid-template-columns:1fr 76px 58px; gap:7px; }
+  }
   @media (max-width:560px){
     .nlog-head { display:none; }
     .nlog-row { grid-template-columns: 1fr auto; row-gap:2px; }
