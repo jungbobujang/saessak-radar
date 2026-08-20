@@ -1409,11 +1409,18 @@ const PRACTICE_ADDRESSES = [
   { zip: '14059', road: '경기도 안양시 동안구 시민대로 235', jibun: '관양동 1591' },
   { zip: '11759', road: '경기도 의정부시 시민로 1', jibun: '의정부동 220' },
   { zip: '17058', road: '경기도 용인시 처인구 명지로 116', jibun: '남동 산38-2' },
+  { zip: '06016', road: '서울특별시 강남구 압구정로 134', jibun: '신사동 592' },
+  { zip: '03925', road: '서울특별시 마포구 월드컵북로 396', jibun: '상암동 1602' },
   { zip: '21554', road: '인천광역시 남동구 예술로 152', jibun: '구월동 1131' },
+  { zip: '22382', road: '인천광역시 중구 인항로 27', jibun: '신흥동3가 7-206' },
+  { zip: '21999', road: '인천광역시 연수구 아카데미로 119', jibun: '송도동 12-1' },
+  { zip: '22212', road: '인천광역시 미추홀구 인하로 100', jibun: '용현동 253' },
+  { zip: '21012', road: '인천광역시 계양구 계양산로 61', jibun: '계산동 940' },
+  { zip: '22689', road: '인천광역시 서구 청라한내로 122', jibun: '청라동 156' },
   { zip: '24341', road: '강원특별자치도 춘천시 중앙로 1', jibun: '봉의동 15' },
   { zip: '34126', road: '대전광역시 유성구 대학로 291', jibun: '구성동 373-1' },
   { zip: '28644', road: '충청북도 청주시 서원구 충대로 1', jibun: '개신동 12' },
-  { zip: '61186', road: '광주광역시 북구 첨단과기로 123', jibun: '오룡동 1', },
+  { zip: '61186', road: '광주광역시 북구 첨단과기로 123', jibun: '오룡동 1' },
   { zip: '42601', road: '대구광역시 달서구 달구벌대로 1095', jibun: '신당동 1095' },
   { zip: '46241', road: '부산광역시 금정구 부산대학로63번길 2', jibun: '장전동 30' },
   { zip: '52828', road: '경상남도 진주시 진주대로 501', jibun: '가좌동 900' },
@@ -1549,6 +1556,13 @@ app.get('/practice', requireAuth, (req, res) => {
             <div class="pf-rowlabel">· 소속학교</div>
             <div class="pf-rowfield"><input class="pf-in" value="○○초등학교" readonly tabindex="-1"></div>
           </div>
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 학교 주소</div>
+            <div class="pf-rowfield">
+              <input class="pf-in" id="pfSchoolAddr" readonly tabindex="-1">
+              <div class="pf-note">아래 <b>교육 장소 주소</b>를 이 주소로 맞춰 넣으세요.</div>
+            </div>
+          </div>
           <div class="pf-note">전부 고정 더미값입니다. 실제 개인정보를 넣지 마세요.</div>
         </div>
       </section>
@@ -1564,6 +1578,7 @@ app.get('/practice', requireAuth, (req, res) => {
                 <input class="pf-in" id="pfAddr" placeholder="주소 검색으로 입력하세요" readonly>
                 <button type="button" class="pf-btn-sub" id="pfAddrBtn">주소 검색</button>
               </div>
+              <div class="pf-addrstatus" id="pfAddrStatus" role="status"></div>
               <input class="pf-in" id="pfAddrDetail" placeholder="상세주소 (선택 — 비워도 됩니다)" style="margin-top:6px;">
             </div>
           </div>
@@ -1628,7 +1643,6 @@ app.get('/practice', requireAuth, (req, res) => {
                   <span class="pf-datecap">· 교육 시작일</span>
                   <div class="pf-daterow">
                     <input class="pf-in" id="pfStartDate" type="date">
-                    <button type="button" class="pf-btn-sub pf-today" id="pfStartToday">오늘</button>
                     <select class="pf-in pf-in-sm" id="pfStartH"></select>
                     <select class="pf-in pf-in-sm" id="pfStartM"></select>
                   </div>
@@ -1637,7 +1651,6 @@ app.get('/practice', requireAuth, (req, res) => {
                   <span class="pf-datecap">· 교육 종료일</span>
                   <div class="pf-daterow">
                     <input class="pf-in" id="pfEndDate" type="date">
-                    <button type="button" class="pf-btn-sub pf-today" id="pfEndToday">오늘</button>
                     <select class="pf-in pf-in-sm" id="pfEndH"></select>
                     <select class="pf-in pf-in-sm" id="pfEndM"></select>
                   </div>
@@ -1706,7 +1719,10 @@ app.get('/practice', requireAuth, (req, res) => {
         <div class="muted small" style="margin-bottom:9px;">
           연습용 더미 주소 목록입니다. 외부 주소 API 를 호출하지 않습니다.
         </div>
-        <input class="pf-in" id="pfSearch" placeholder="도로명·지역명 두 글자 이상 입력" autocomplete="off">
+        <div class="pf-searchrow">
+          <input class="pf-in" id="pfSearch" placeholder="도로명·지역명 두 글자 이상 입력 후 엔터" autocomplete="off">
+          <button type="button" class="pf-btn-sub" id="pfSearchBtn">검색</button>
+        </div>
         <div class="pf-results" id="pfResults"></div>
       </div>
     </div>
@@ -1730,6 +1746,23 @@ app.get('/practice', requireAuth, (req, res) => {
       var STORE_KEY = 'saessak:practice:v2';
       var MAX_RECORDS = 20;
       var SEG_LABELS = ['주소 입력까지', '대상·인원·차시까지', '날짜·운영시간까지', '약관·제출까지'];
+
+      // ---- 주소 검색 지연 (ms) ----
+      // 실제 사이트의 주소 검색은 별도 팝업이 뜨고, 그 안에서 다시 조회 요청이 오간다.
+      // 이 왕복을 빼면 연습 기록이 실전보다 크게 짧게 나와 시간 감각이 어긋난다.
+      // 아래 값은 실측이 아니라 체감 기준의 어림값이다. 실측하면 이 상수만 바꾸면 된다.
+      //   open   : [주소 검색] 클릭 → 팝업이 뜨고 스크립트가 로드되기까지
+      //   search : 검색 실행(엔터/버튼) → 결과 목록이 내려오기까지
+      //   pick   : 항목 선택 → 팝업이 닫히고 주소칸에 반영되기까지
+      var ADDR_DELAY = {
+        open: [300, 700],
+        search: [400, 900],
+        pick: [200, 400],
+      };
+      // 한 번에 보여 줄 검색 결과 수. 실전처럼 목록을 눈으로 훑는 시간이 생기도록
+      // 최소 6건은 깔고, 정답 항목을 첫 줄에 고정하지 않는다.
+      var ADDR_RESULT_MIN = 6;
+      var ADDR_RESULT_MAX = 10;
 
       var el = {
         start: document.getElementById('prStart'),
@@ -1759,8 +1792,9 @@ app.get('/practice', requireAuth, (req, res) => {
         count: document.getElementById('pfCount'),
         sessions: document.getElementById('pfSessions'),
         startDate: document.getElementById('pfStartDate'),
-        startToday: document.getElementById('pfStartToday'),
-        endToday: document.getElementById('pfEndToday'),
+        schoolAddr: document.getElementById('pfSchoolAddr'),
+        addrStatus: document.getElementById('pfAddrStatus'),
+        searchBtn: document.getElementById('pfSearchBtn'),
         startH: document.getElementById('pfStartH'),
         startM: document.getElementById('pfStartM'),
         endDate: document.getElementById('pfEndDate'),
@@ -2028,6 +2062,13 @@ app.get('/practice', requireAuth, (req, res) => {
           '※ 20명 이내로 기입(한 학급에 20명 초과일 경우 운영기관과 사전 협의 필요)' +
           (quiz.capOver ? ' — 이번 프로그램은 ' + quiz.cap + '명 이상 모집' : '');
 
+        // 이번 회차의 '우리 학교 주소' — 주소 검색에서 이걸 찾아 골라야 한다.
+        // 정답이 정해져 있어야 목록을 훑는 시간이 실제로 생긴다.
+        quiz.school = rand(ADDRESSES);
+        el.schoolAddr.value = quiz.school.road;
+        addrWaitMs = 0;
+        setAddrStatus('');
+
         // 값 비우기
         el.addr.value = ''; el.addrDetail.value = '';
         el.target.value = '';
@@ -2082,73 +2123,117 @@ app.get('/practice', requireAuth, (req, res) => {
         el.formCard.addEventListener(ev, checkSegments);
       });
 
-      // ---- 주소 검색 모달 (더미 목록 필터링 · 외부 통신 없음) ----
+      // ---- 주소 검색 모달 (더미 목록 · 외부 통신 없음) ----
+      // 실시간 필터링을 쓰지 않는다. 실제 사이트는 엔터를 쳐야 조회되고,
+      // 그 왕복 시간이 실전 기록의 상당 부분을 차지한다.
+      var addrBusy = false;      // 지연 중 중복 실행 방지
+      var addrWaitMs = 0;        // 이번 회차에 지연으로 흘려보낸 시간 합 (조작/대기 분리용)
+
+      function delayOf(pair) { return randInt(pair[0], pair[1]); }
+      // 지연을 걸고, 그동안 흐른 시간을 대기 시간으로 적립한다
+      function afterDelay(pair, fn) {
+        var ms = delayOf(pair);
+        addrBusy = true;
+        setTimeout(function () {
+          addrWaitMs += ms;
+          addrBusy = false;
+          fn();
+        }, ms);
+        return ms;
+      }
+      function setAddrStatus(text) {
+        el.addrStatus.textContent = text || '';
+        el.addrStatus.className = 'pf-addrstatus' + (text ? ' is-on' : '');
+      }
+
       function openModal() {
-        el.modal.hidden = false;
-        el.search.value = '';
-        renderResults('');
-        el.search.focus();
+        if (addrBusy || !el.modal.hidden) return;
+        // 팝업이 곧바로 뜨지 않는다 — 창이 열리고 스크립트가 로드되는 시간
+        setAddrStatus('주소 검색 창을 여는 중…');
+        afterDelay(ADDR_DELAY.open, function () {
+          setAddrStatus('');
+          el.modal.hidden = false;
+          el.search.value = '';
+          el.results.innerHTML =
+            '<div class="pf-results-ph">검색어를 넣고 <b>엔터</b> 또는 [검색] 을 누르세요.</div>';
+          el.search.focus();
+        });
       }
       function closeModal() { el.modal.hidden = true; }
-      function renderResults(q) {
-        var term = String(q || '').trim();
-        if (term.length < 2) {
-          el.results.innerHTML = '<div class="pf-results-ph">두 글자 이상 입력하면 목록이 나타납니다.</div>';
-          return;
-        }
-        var hits = ADDRESSES.filter(function (a) {
-          return a.road.indexOf(term) >= 0 || a.jibun.indexOf(term) >= 0 || a.zip.indexOf(term) >= 0;
-        }).slice(0, 6);
-        if (!hits.length) {
-          el.results.innerHTML = '<div class="pf-results-ph">검색 결과가 없습니다. (연습용 더미 목록)</div>';
-          return;
-        }
-        el.results.innerHTML = hits.map(function (a) {
-          return '<button type="button" class="pf-result" data-road="' + escAttr(a.road) + '">' +
-            '<span class="pf-zip">' + a.zip + '</span>' +
-            '<span class="pf-road">' + a.road + '</span>' +
-            '<span class="pf-jibun">' + a.jibun + '</span>' +
-            '</button>';
-        }).join('');
-      }
+
       function escAttr(s) {
         return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      }
+
+      // 검색 결과 만들기: 검색어에 걸리는 항목 + (모자라면) 다른 항목으로 6~10건을 채우고
+      // 섞는다. 정답이 늘 첫 줄에 오면 목록을 훑을 이유가 없어져 연습이 되지 않는다.
+      function buildResults(term) {
+        var hit = [], rest = [];
+        ADDRESSES.forEach(function (a) {
+          var m = a.road.indexOf(term) >= 0 || a.jibun.indexOf(term) >= 0 || a.zip.indexOf(term) >= 0;
+          (m ? hit : rest).push(a);
+        });
+        if (!hit.length) return [];
+        var want = randInt(ADDR_RESULT_MIN, ADDR_RESULT_MAX);
+        var list = hit.slice(0, want);
+        // 걸린 항목이 모자라면 같은 목록의 다른 주소로 채운다 (실제 조회도 비슷하게 넓게 나온다)
+        for (var i = 0; list.length < want && i < rest.length; i++) list.push(rest[i]);
+        // 섞기 (Fisher–Yates)
+        for (var j = list.length - 1; j > 0; j--) {
+          var k = Math.floor(Math.random() * (j + 1));
+          var t = list[j]; list[j] = list[k]; list[k] = t;
+        }
+        return list;
+      }
+
+      function runSearch() {
+        if (addrBusy) return;
+        var term = String(el.search.value || '').trim();
+        if (term.length < 2) {
+          el.results.innerHTML = '<div class="pf-results-ph">두 글자 이상 입력해야 조회됩니다.</div>';
+          return;
+        }
+        el.results.innerHTML = '<div class="pf-results-ph pf-loading">검색 중…</div>';
+        afterDelay(ADDR_DELAY.search, function () {
+          var list = buildResults(term);
+          if (!list.length) {
+            el.results.innerHTML = '<div class="pf-results-ph">검색 결과가 없습니다. (연습용 더미 목록)</div>';
+            return;
+          }
+          el.results.innerHTML = list.map(function (a) {
+            return '<button type="button" class="pf-result" data-road="' + escAttr(a.road) + '">' +
+              '<span class="pf-zip">' + a.zip + '</span>' +
+              '<span class="pf-road">' + a.road + '</span>' +
+              '<span class="pf-jibun">' + a.jibun + '</span>' +
+              '</button>';
+          }).join('');
+        });
       }
 
       el.addrBtn.addEventListener('click', openModal);
       el.modalBack.addEventListener('click', closeModal);
       el.modalX.addEventListener('click', closeModal);
-      el.search.addEventListener('input', function () { renderResults(el.search.value); });
+      el.searchBtn.addEventListener('click', runSearch);
+      el.search.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+      });
       el.results.addEventListener('click', function (e) {
         var b = e.target.closest ? e.target.closest('.pf-result') : null;
-        if (!b) return;
-        el.addr.value = b.getAttribute('data-road');
-        el.addr.classList.remove('pf-bad');
-        closeModal();
-        checkSegments();
-        el.addrDetail.focus();
+        if (!b || addrBusy) return;
+        var road = b.getAttribute('data-road');
+        // 고른 뒤에도 곧바로 반영되지 않는다 — 팝업이 닫히고 값이 넘어오는 시간
+        el.results.innerHTML = '<div class="pf-results-ph pf-loading">선택한 주소를 반영하는 중…</div>';
+        afterDelay(ADDR_DELAY.pick, function () {
+          el.addr.value = road;
+          el.addr.classList.remove('pf-bad');
+          closeModal();
+          checkSegments();
+          el.addrDetail.focus();
+        });
       });
       document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape' && !el.modal.hidden) closeModal();
+        if (e.key === 'Escape' && !el.modal.hidden && !addrBusy) closeModal();
       });
-
-      // ---- [오늘] 버튼 ----
-      // 실전에서 날짜는 승인 뒤 협의로 조정된다. 정확한 날을 고르느라 달력을 뒤지는 대신
-      // 오늘로 찍고 넘어가는 게 빠르다 — 그 요령을 버튼으로 만들어 둔다.
-      function todayYmd() {
-        var d = new Date();
-        var p = function (n) { return (n < 10 ? '0' : '') + n; };
-        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-      }
-      function setToday(input) {
-        input.value = todayYmd();
-        input.classList.remove('pf-bad');
-        // 직접 값을 넣으면 input 이벤트가 안 나므로 구간 계측용으로 직접 쏜다
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      el.startToday.addEventListener('click', function () { setToday(el.startDate); });
-      el.endToday.addEventListener('click', function () { setToday(el.endDate); });
 
       // ---- 날짜칸 숫자 입력 (20260901 → 2026-09-01) ----
       // input[type=date] 는 숫자 키를 그냥 흘려버린다(실측 확인). 그래서 자리 이동 없이
@@ -2227,7 +2312,11 @@ app.get('/practice', requireAuth, (req, res) => {
           if (node) node.classList.add('pf-bad');
           bad.push(msg);
         }
-        if (!el.addr.value) fail(el.addr, '교육 장소 주소를 입력하지 않았습니다');
+        if (!el.addr.value) {
+          fail(el.addr, '교육 장소 주소를 입력하지 않았습니다');
+        } else if (el.addr.value !== quiz.school.road) {
+          fail(el.addr, '교육 장소 주소가 학교 주소와 다릅니다 (정답: ' + quiz.school.road + ')');
+        }
         if (el.target.value !== '일반학교') {
           fail(el.target, '신청 교육 대상이 다릅니다 (정답: 일반학교)');
         }
@@ -2388,6 +2477,12 @@ app.get('/practice', requireAuth, (req, res) => {
         var worstIdx = 0;
         for (var i = 1; i < 4; i++) if (durs[i] > durs[worstIdx]) worstIdx = i;
 
+        // 주소 구간(0번)에는 주소 검색 팝업의 시스템 지연이 섞여 있다.
+        // 본인 조작 시간과 구분해 보여 줘야 "내가 느린 건지 창이 느린 건지" 를 가릴 수 있다.
+        // 기록에도 남기므로 화면을 그리기 전에 먼저 구한다.
+        var waitMs = Math.min(addrWaitMs, durs[0]);
+        var handMs = Math.max(0, durs[0] - waitMs);
+
         var d = load();
         var prevBest = d.best;
         // 실격 회차는 최고기록 갱신 대상이 아니다
@@ -2399,6 +2494,7 @@ app.get('/practice', requireAuth, (req, res) => {
           dq: dq,
           worst: SEG_LABELS[worstIdx],
           segs: durs.map(function (x) { return Math.round(x); }),
+          addrWait: Math.round(waitMs),   // 주소 구간에 섞인 시스템 지연
           reaction: reactionMs,
           miss: missCount,
         });
@@ -2410,11 +2506,21 @@ app.get('/practice', requireAuth, (req, res) => {
 
         // ---- 결과 화면 ----
         var segHtml = durs.map(function (x, i) {
+          var label = SEG_LABELS[i] + (i === 0 ? ' <span class="pr-seg-note">대기시간 포함</span>' : '');
+          var sub = (i === 0 && waitMs > 0)
+            ? '<div class="pr-segsplit">조작 ' + fmtSec(handMs) + '초 · ' +
+              '<span class="pr-segwait">대기 ' + fmtSec(waitMs) + '초</span></div>'
+            : '';
           return '<div class="pr-seg' + (i === worstIdx ? ' pr-seg-worst' : '') + '">' +
-            '<span class="pr-seg-label">' + SEG_LABELS[i] + '</span>' +
-            '<span class="pr-seg-bar"><i style="width:' +
-              (totalMs > 0 ? Math.round((x / totalMs) * 100) : 0) + '%"></i></span>' +
+            '<span class="pr-seg-label">' + label + '</span>' +
+            '<span class="pr-seg-bar">' +
+              (i === 0 && waitMs > 0
+                ? '<i style="width:' + (totalMs > 0 ? Math.round((handMs / totalMs) * 100) : 0) + '%"></i>' +
+                  '<i class="pr-bar-wait" style="width:' + (totalMs > 0 ? Math.round((waitMs / totalMs) * 100) : 0) + '%"></i>'
+                : '<i style="width:' + (totalMs > 0 ? Math.round((x / totalMs) * 100) : 0) + '%"></i>') +
+            '</span>' +
             '<span class="pr-seg-val">' + fmtSec(x) + 's</span>' +
+            sub +
             '</div>';
         }).join('');
 
@@ -3880,7 +3986,14 @@ function pageShell(title, body) {
   .pr-worst { margin-top:10px; font-size:13px; color:var(--text-secondary); }
   .pr-tip { margin-top:9px; padding:10px 13px; border-radius:10px; font-size:13px; line-height:1.5;
     background:#fff6e6; border:1px solid #f0dcae; color:#7a5200; }
-  .pf-today { white-space:nowrap; flex-shrink:0; }
+  /* 주소 구간: 조작 시간과 시스템 대기 시간을 갈라 보여 준다 */
+  .pr-seg-note { font-size:10px; font-weight:700; color:#8a5a08; background:#fbeed5;
+    padding:1px 6px; border-radius:999px; white-space:nowrap; }
+  .pr-segsplit { grid-column:1 / -1; font-size:11px; color:var(--text-muted); padding-left:1px; }
+  .pr-segwait { color:#8a5a08; font-weight:700; }
+  .pr-seg-bar { display:flex; }
+  .pr-bar-wait { background:repeating-linear-gradient(45deg,
+    #e0c07a 0 4px, #f0dcae 4px 8px) !important; }
   .pr-badlist { margin-top:11px; padding:11px 13px; border-radius:10px;
     background:#fdeaea; border:1px solid #f3caca; color:#7a2020; font-size:13px; }
   .pr-badlist ul { margin:6px 0 0; padding-left:18px; }
@@ -3943,6 +4056,12 @@ function pageShell(title, body) {
   .pf-warn { font-size:12px; color:#c0392b; line-height:1.45; }
   .pf-addr-row { display:flex; gap:7px; align-items:center; }
   .pf-addr-row .pf-in { flex:1; }
+  /* 주소 검색 팝업이 열리기까지의 상태 표시 */
+  .pf-addrstatus { font-size:12px; color:#6b6b6b; min-height:0; }
+  .pf-addrstatus.is-on { min-height:18px; margin-top:5px; color:#8a5a08; font-weight:600; }
+  .pf-searchrow { display:flex; gap:7px; align-items:center; }
+  .pf-searchrow .pf-in { flex:1; }
+  .pf-loading { color:#8a5a08; font-weight:600; }
   /* 신청 가능 대상 — 학교급 라벨 + 학년 체크박스 가로 균등 */
   .pf-grades { display:grid; gap:6px; }
   .pf-graderow { display:grid; grid-template-columns:76px 1fr; gap:10px; align-items:center;
