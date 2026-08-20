@@ -1343,6 +1343,7 @@ const PRACTICE_PROGRAMS = [
     fields: {
       신청기간: '2026-09-01(화) 10:00 ~ 2026-09-12(금) 17:00',
       교육기간: '2026-10-05(월) ~ 2026-11-27(금)',
+      프로그램유형: '방문형',
       교육대상: '초등학교 4~6학년',
       프로그램수준: '기본',
       프로그램소양: 'AI 리터러시',
@@ -1360,6 +1361,7 @@ const PRACTICE_PROGRAMS = [
     fields: {
       신청기간: '2026-09-03(목) 09:00 ~ 2026-09-19(금) 18:00',
       교육기간: '2026-10-12(월) ~ 2026-12-04(금)',
+      프로그램유형: '집합형',
       교육대상: '중학교 1~3학년',
       프로그램수준: '특화',
       프로그램소양: '데이터 과학 · 문제해결',
@@ -1377,6 +1379,7 @@ const PRACTICE_PROGRAMS = [
     fields: {
       신청기간: '2026-09-07(월) 14:00 ~ 2026-09-25(목) 17:00',
       교육기간: '2026-10-19(월) ~ 2026-12-11(금)',
+      프로그램유형: '방문형',
       교육대상: '초등학교 5~6학년 / 중학교 1학년',
       프로그램수준: 'AI 특화',
       프로그램소양: '피지컬 컴퓨팅',
@@ -1421,19 +1424,21 @@ const PRACTICE_ADDRESSES = [
 const PRACTICE_QUIZ = {
   sessions: [8, 12, 16],
   // 모집 학년 범위는 초등학교로만 뽑는다 (중·고 범위는 문제로 내지 않는다).
+  // grades = 이번 문제에서 체크가 열리는 초등 학년들
   ranges: [
-    { label: '초등학교 1~6학년 전체', row: 'elem' },
-    { label: '초등학교 1~4학년', row: 'elem' },
-    { label: '초등학교 5~6학년', row: 'elem' },
-    { label: '초등학교 3~6학년', row: 'elem' },
-    { label: '초등학교 1~2학년', row: 'elem' },
+    { label: '초등학교 1~6학년 전체', row: 'elem', grades: [1, 2, 3, 4, 5, 6] },
+    { label: '초등학교 1~4학년', row: 'elem', grades: [1, 2, 3, 4] },
+    { label: '초등학교 5~6학년', row: 'elem', grades: [5, 6] },
+    { label: '초등학교 3~6학년', row: 'elem', grades: [3, 4, 5, 6] },
+    { label: '초등학교 1~2학년', row: 'elem', grades: [1, 2] },
   ],
-  // 체크박스 행은 실제 폼과 똑같이 3줄을 그대로 둔다. 중·고 행은 늘 비활성이지만,
-  // 실전에서 그 줄을 건너뛰는 눈동자 움직임까지 연습 대상이라 지우지 않는다.
+  // 체크박스는 실제 폼과 똑같이 학교급 3행 × 학년별로 놓는다 (초 6 + 중 3 + 고 3 = 12개).
+  // 중·고 행은 늘 비활성이지만 지우지 않는다 — 실전에서 그 줄을 건너뛰는
+  // 눈동자 움직임까지 연습 대상이다.
   gradeRows: [
-    { key: 'elem', label: '초등학교 1~6학년' },
-    { key: 'mid', label: '중학교 1~3학년' },
-    { key: 'high', label: '고등학교 1~3학년' },
+    { key: 'elem', label: '초등학생', grades: [1, 2, 3, 4, 5, 6] },
+    { key: 'mid', label: '중학생', grades: [1, 2, 3] },
+    { key: 'high', label: '고등학생', grades: [1, 2, 3] },
   ],
   // 교육대상 — 실제 폼에 있는 7개를 그대로 둔다. 하나도 지우거나 잠그지 않는다.
   // 우리 학교가 신청할 수 있는 건 일반형·배려형(이주배경)·교복우 셋뿐이고,
@@ -1516,142 +1521,177 @@ app.get('/practice', requireAuth, (req, res) => {
     <div class="card" id="prFormCard" hidden>
       <div class="card-title">신청서 작성 <span class="muted small">(계측 중 — 아래 [신청] 까지)</span></div>
 
-      <!-- 프로그램 기본정보: 실전처럼 '위를 보고 아래를 채우는' 구조 -->
+      <!-- 프로그램 기본정보: 초록 테두리 2열. 실전처럼 '위를 보고 아래를 채우는' 구조 -->
       <div class="pf-info">
-        <div class="pf-info-title">📋 프로그램 기본정보</div>
-        <dl class="pf-info-list" id="pfInfoList"></dl>
+        <div class="pf-info-grid" id="pfInfoList"></div>
         <div class="pf-info-hint" id="pfInfoHint"></div>
       </div>
 
-      <!-- 1) 담당자 정보 — 고정 더미, 계측 대상 아님 -->
+      <!-- ① 담당자 정보 — 고정 더미, 계측 대상 아님 -->
       <section class="pf-sec">
-        <div class="pf-legend">1. 담당자 정보
+        <h3 class="pf-sec-title"><span class="pf-sec-ico" aria-hidden="true">🔖</span>담당자 정보
           <span class="pf-tag">자동 입력 · 수정 불가 · 계측 제외</span>
-        </div>
-        <div class="pf-grid2">
-          <label class="pf-field"><span class="pf-label">현장 담당자명</span>
-            <input class="pf-in" value="홍길동" readonly tabindex="-1"></label>
-          <label class="pf-field"><span class="pf-label">연락처</span>
-            <input class="pf-in" value="010-1234-5678" readonly tabindex="-1"></label>
-          <label class="pf-field"><span class="pf-label">이메일</span>
-            <input class="pf-in" value="hong@naver.com" readonly tabindex="-1"></label>
-          <label class="pf-field"><span class="pf-label">소속학교</span>
-            <input class="pf-in" value="○○초등학교" readonly tabindex="-1"></label>
-        </div>
-        <div class="muted small" style="margin-top:7px;">
-          전부 고정 더미값입니다. 실제 개인정보를 넣지 마세요.
-        </div>
-      </section>
-
-      <!-- 2) 교육 장소 주소 -->
-      <section class="pf-sec">
-        <div class="pf-legend">2. 교육 장소 주소 <b class="pf-req">*</b></div>
-        <div class="pf-addr-row">
-          <input class="pf-in" id="pfAddr" placeholder="주소 검색으로 입력하세요" readonly>
-          <button type="button" class="btn btn-sm btn-ghost" id="pfAddrBtn">주소 검색</button>
-        </div>
-        <input class="pf-in" id="pfAddrDetail" placeholder="상세주소 (선택 — 비워도 됩니다)" style="margin-top:7px;">
-      </section>
-
-      <!-- 3) 신청 교육 대상 -->
-      <section class="pf-sec">
-        <div class="pf-legend">3. 신청 교육 대상 <b class="pf-req">*</b></div>
-        <select class="pf-in" id="pfTarget">
-          <option value="">선택</option>
-          <option value="일반학교">일반학교</option>
-          <option value="초등돌봄·교육(구 늘봄학교)">초등돌봄·교육(구 늘봄학교)</option>
-          <option value="특성화·마이스터고등학교">특성화·마이스터고등학교</option>
-          <option value="학교밖(대안학교, 센터 등)">학교밖(대안학교, 센터 등)</option>
-        </select>
-      </section>
-
-      <!-- 4) 신청 가능 대상 -->
-      <section class="pf-sec">
-        <div class="pf-legend">4. 신청 가능 대상 <b class="pf-req">*</b>
-          <span class="pf-tag">모집 학년 범위에 해당하는 항목만 선택 가능</span>
-        </div>
-        <div class="pf-grades" id="pfGrades"></div>
-      </section>
-
-      <!-- 5) 교육대상 — 7개 전부 선택 가능. 맞고 틀림은 채점에서만 갈린다. -->
-      <section class="pf-sec">
-        <div class="pf-legend">5. 교육대상 <b class="pf-req">*</b>
-          <span class="pf-tag">해당하는 것을 고르세요</span>
-        </div>
-        <div class="pf-edus" id="pfEdus"></div>
-      </section>
-
-      <!-- 6~7) 신청 인원 / 총 교육 차시 -->
-      <section class="pf-sec">
-        <div class="pf-grid2">
-          <label class="pf-field"><span class="pf-label">6. 신청 인원 <b class="pf-req">*</b></span>
-            <input class="pf-in" id="pfCount" type="number" min="1" max="99" inputmode="numeric" placeholder="명"></label>
-          <label class="pf-field"><span class="pf-label">7. 총 교육 차시 <b class="pf-req">*</b></span>
-            <input class="pf-in" id="pfSessions" type="number" min="1" max="99" inputmode="numeric" placeholder="차시"></label>
+        </h3>
+        <div class="pf-sec-body">
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 현장 담당자명</div>
+            <div class="pf-rowfield"><input class="pf-in" value="홍길동" readonly tabindex="-1"></div>
+          </div>
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 연락처</div>
+            <div class="pf-rowfield"><input class="pf-in" value="010-1234-5678" readonly tabindex="-1"></div>
+          </div>
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 이메일</div>
+            <div class="pf-rowfield"><input class="pf-in" value="hong@naver.com" readonly tabindex="-1"></div>
+          </div>
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 소속학교</div>
+            <div class="pf-rowfield"><input class="pf-in" value="○○초등학교" readonly tabindex="-1"></div>
+          </div>
+          <div class="pf-note">전부 고정 더미값입니다. 실제 개인정보를 넣지 마세요.</div>
         </div>
       </section>
 
-      <!-- 8) 교육 시작일 / 종료일 -->
+      <!-- ② 신청 대상 정보 -->
       <section class="pf-sec">
-        <div class="pf-legend">8. 교육 시작일 / 종료일 <b class="pf-req">*</b>
-          <span class="pf-tag">형식만 채우면 통과 · 앞뒤 순서 안 봄</span>
-        </div>
-        <div class="pf-datewrap">
-          <span class="pf-label">시작</span>
-          <div class="pf-daterow">
-            <input class="pf-in" id="pfStartDate" type="date">
-            <button type="button" class="btn btn-sm btn-ghost pf-today" id="pfStartToday">오늘</button>
-            <select class="pf-in pf-in-sm" id="pfStartH"></select>
-            <select class="pf-in pf-in-sm" id="pfStartM"></select>
+        <h3 class="pf-sec-title"><span class="pf-sec-ico" aria-hidden="true">🔖</span>신청 대상 정보</h3>
+        <div class="pf-sec-body">
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 교육 장소 주소 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield">
+              <div class="pf-addr-row">
+                <input class="pf-in" id="pfAddr" placeholder="주소 검색으로 입력하세요" readonly>
+                <button type="button" class="pf-btn-sub" id="pfAddrBtn">주소 검색</button>
+              </div>
+              <input class="pf-in" id="pfAddrDetail" placeholder="상세주소 (선택 — 비워도 됩니다)" style="margin-top:6px;">
+            </div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 신청 교육 대상 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield">
+              <select class="pf-in" id="pfTarget">
+                <option value="">선택</option>
+                <option value="일반학교">일반학교</option>
+                <option value="초등돌봄·교육(구 늘봄학교)">초등돌봄·교육(구 늘봄학교)</option>
+                <option value="특성화·마이스터고등학교">특성화·마이스터고등학교</option>
+                <option value="학교밖(대안학교, 센터 등)">학교밖(대안학교, 센터 등)</option>
+                <option value="사회적 배려형(도서벽지)">사회적 배려형(도서벽지)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 신청 가능 대상 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield"><div class="pf-grades" id="pfGrades"></div></div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 교육대상 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield"><div class="pf-edus" id="pfEdus"></div></div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 신청 인원 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield">
+              <div class="pf-inline">
+                <input class="pf-in pf-in-num" id="pfCount" type="number" min="1" max="99" inputmode="numeric">
+                <span class="pf-unit">명</span>
+                <span class="pf-warn" id="pfCountWarn"></span>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="pf-datewrap" style="margin-top:8px;">
-          <span class="pf-label">종료</span>
-          <div class="pf-daterow">
-            <input class="pf-in" id="pfEndDate" type="date">
-            <button type="button" class="btn btn-sm btn-ghost pf-today" id="pfEndToday">오늘</button>
-            <select class="pf-in pf-in-sm" id="pfEndH"></select>
-            <select class="pf-in pf-in-sm" id="pfEndM"></select>
+      </section>
+
+      <!-- ③ 교육 시간 -->
+      <section class="pf-sec">
+        <h3 class="pf-sec-title"><span class="pf-sec-ico" aria-hidden="true">🔖</span>교육 시간</h3>
+        <div class="pf-sec-body">
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 총 교육 차시 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield">
+              <div class="pf-inline">
+                <input class="pf-in pf-in-num" id="pfSessions" type="number" min="1" max="99" inputmode="numeric">
+                <span class="pf-unit">차시</span>
+                <span class="pf-warn">※ 프로그램 기본정보의 총 교육 차시와 같아야 합니다</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 교육 시작일 / 종료일 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield">
+              <div class="pf-dates2">
+                <div class="pf-datecell">
+                  <span class="pf-datecap">· 교육 시작일</span>
+                  <div class="pf-daterow">
+                    <input class="pf-in" id="pfStartDate" type="date">
+                    <button type="button" class="pf-btn-sub pf-today" id="pfStartToday">오늘</button>
+                    <select class="pf-in pf-in-sm" id="pfStartH"></select>
+                    <select class="pf-in pf-in-sm" id="pfStartM"></select>
+                  </div>
+                </div>
+                <div class="pf-datecell">
+                  <span class="pf-datecap">· 교육 종료일</span>
+                  <div class="pf-daterow">
+                    <input class="pf-in" id="pfEndDate" type="date">
+                    <button type="button" class="pf-btn-sub pf-today" id="pfEndToday">오늘</button>
+                    <select class="pf-in pf-in-sm" id="pfEndH"></select>
+                    <select class="pf-in pf-in-sm" id="pfEndM"></select>
+                  </div>
+                </div>
+              </div>
+              <div class="pf-note">
+                날짜칸에 숫자만 이어서 쳐도 됩니다 (예: 20260901). 시·분은 09시 00분이 미리 들어가 있습니다.
+                형식만 채우면 통과하며 앞뒤 순서는 보지 않습니다.
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 운영시간 <b class="pf-req">*</b></div>
+            <div class="pf-rowfield"><select class="pf-in" id="pfOpTime"></select></div>
           </div>
         </div>
-        <div class="muted small" style="margin-top:7px;">
-          날짜칸에 숫자만 이어서 쳐도 됩니다 (예: 20260901). 시·분은 09시 00분이 미리 들어가 있습니다.
+      </section>
+
+      <!-- ④ 요청사항 -->
+      <section class="pf-sec">
+        <h3 class="pf-sec-title"><span class="pf-sec-ico" aria-hidden="true">🔖</span>요청사항</h3>
+        <div class="pf-sec-body">
+          <div class="pf-row">
+            <div class="pf-rowlabel">· 요청사항</div>
+            <div class="pf-rowfield">
+              <textarea class="pf-in pf-ta" id="pfNote" rows="4" placeholder="운영기관에 전달할 요청사항 (선택 — 비워도 통과)"></textarea>
+              <button type="button" class="pf-btn-sub" id="pfBoiler" style="margin-top:6px;">📋 정형문구 붙여넣기</button>
+            </div>
+          </div>
         </div>
       </section>
 
-      <!-- 9) 운영시간 -->
+      <!-- ⑤ 약관 동의 -->
       <section class="pf-sec">
-        <div class="pf-legend">9. 운영시간 <b class="pf-req">*</b></div>
-        <select class="pf-in" id="pfOpTime"></select>
-      </section>
-
-      <!-- 10) 요청사항 -->
-      <section class="pf-sec">
-        <div class="pf-legend">10. 요청사항 <span class="pf-tag">선택 — 비워도 통과</span></div>
-        <textarea class="pf-in pf-ta" id="pfNote" rows="4" placeholder="운영기관에 전달할 요청사항"></textarea>
-        <button type="button" class="btn btn-sm btn-ghost" id="pfBoiler" style="margin-top:7px;">
-          📋 정형문구 붙여넣기
-        </button>
-      </section>
-
-      <!-- 11) 약관 동의 -->
-      <section class="pf-sec">
-        <div class="pf-legend">11. 약관 동의 <b class="pf-req">*</b></div>
-        <label class="pf-agree pf-agree-all">
-          <input type="checkbox" id="pfAgreeAll"><span><b>전체 동의</b></span>
-        </label>
-        <label class="pf-agree">
-          <input type="checkbox" id="pfAgree1"><span><b class="pf-must">[필수]</b> 개인정보 수집 및 이용 동의</span>
-        </label>
-        <label class="pf-agree">
-          <input type="checkbox" id="pfAgree2"><span><b class="pf-must">[필수]</b> 개인정보 제3자 제공 동의</span>
-        </label>
+        <h3 class="pf-sec-title"><span class="pf-sec-ico" aria-hidden="true">🔖</span>약관 동의</h3>
+        <div class="pf-sec-body">
+          <label class="pf-agree pf-agree-all">
+            <input type="checkbox" id="pfAgreeAll"><span>전체동의</span>
+            <button type="button" class="pf-more" id="pfMoreAll">더보기</button>
+          </label>
+          <label class="pf-agree">
+            <input type="checkbox" id="pfAgree1"><span><b class="pf-must">[필수]</b> 개인정보 수집 및 이용 동의</span>
+          </label>
+          <label class="pf-agree">
+            <input type="checkbox" id="pfAgree2"><span><b class="pf-must">[필수]</b> 개인정보 제 3 자 제공 동의</span>
+          </label>
+        </div>
       </section>
 
       <div class="pf-submitmsg" id="pfSubmitMsg" role="status"></div>
       <div class="pf-actions">
-        <button type="button" class="btn btn-ghost" id="pfCancel">취소</button>
-        <button type="button" class="btn btn-green" id="pfSubmit">신청</button>
+        <button type="button" class="pf-btn pf-btn-cancel" id="pfCancel">취소</button>
+        <button type="button" class="pf-btn pf-btn-submit" id="pfSubmit">신청</button>
       </div>
     </div>
 
@@ -1715,6 +1755,7 @@ app.get('/practice', requireAuth, (req, res) => {
         target: document.getElementById('pfTarget'),
         grades: document.getElementById('pfGrades'),
         edus: document.getElementById('pfEdus'),
+        countWarn: document.getElementById('pfCountWarn'),
         count: document.getElementById('pfCount'),
         sessions: document.getElementById('pfSessions'),
         startDate: document.getElementById('pfStartDate'),
@@ -1771,23 +1812,48 @@ app.get('/practice', requireAuth, (req, res) => {
         };
       }
 
-      // ---- 기본정보 박스 ----
+      // ---- 기본정보 박스 (2열) ----
+      // 좌: 운영기관명·신청기간·프로그램수준·총교육차시·모집 학년 범위·모집 인원
+      // 우: 프로그램유형·교육기간·프로그램소양·교육장소·운영 구분·모집 학급
+      // 실제 화면의 8개 항목에 더해, 문제를 풀려면 반드시 보여야 하는 값
+      // (학년 범위·인원·운영 구분)을 같은 박스 안에 함께 놓는다.
       function renderQuizInfo() {
-        el.infoList.innerHTML = '';
-        var rows = [
-          ['총 교육 차시', quiz.sessions + '차시'],
+        var f = (current && current.fields) || {};
+        var left = [
+          ['운영기관명', (current && current.institution) || '—'],
+          ['신청기간', f['신청기간'] || '—'],
+          ['프로그램수준', f['프로그램수준'] || '—'],
+          ['총교육차시', quiz.sessions + '차시'],
           ['모집 학년 범위', quiz.range.label],
           ['모집 인원', quiz.capOver ? quiz.cap + '명 이상 모집' : quiz.cap + '명'],
-          ['운영 구분', quiz.weekend ? '주말 운영' : '평일(주중) 운영'],
         ];
-        rows.forEach(function (r) {
-          var dt = document.createElement('dt');
-          dt.textContent = r[0];
-          var dd = document.createElement('dd');
-          dd.textContent = r[1];
-          el.infoList.appendChild(dt);
-          el.infoList.appendChild(dd);
-        });
+        var right = [
+          ['프로그램유형', f['프로그램유형'] || '—'],
+          ['교육기간', f['교육기간'] || '—'],
+          ['프로그램소양', f['프로그램소양'] || '—'],
+          ['교육장소', f['교육장소'] || '—'],
+          ['운영 구분', quiz.weekend ? '주말 운영' : '평일(주중) 운영'],
+          ['모집 학급', f['모집학급'] || '—'],
+        ];
+        el.infoList.innerHTML = '';
+        function cell(pair) {
+          var wrap = document.createElement('div');
+          wrap.className = 'pf-info-cell';
+          var k = document.createElement('span');
+          k.className = 'pf-info-k';
+          k.textContent = pair[0];
+          var v = document.createElement('span');
+          v.className = 'pf-info-v';
+          v.textContent = pair[1];
+          wrap.appendChild(k);
+          wrap.appendChild(v);
+          return wrap;
+        }
+        // 좌우를 한 행씩 번갈아 넣어 2열 격자로 흐르게 한다
+        for (var i = 0; i < left.length; i++) {
+          el.infoList.appendChild(cell(left[i]));
+          el.infoList.appendChild(cell(right[i]));
+        }
         el.infoHint.textContent = quiz.weekend
           ? '※ 이 프로그램은 주말에 운영됩니다. 운영시간 항목을 그에 맞게 고르세요.'
           : '※ 이 프로그램은 평일(주중) 방과후에 운영됩니다. 운영시간 항목을 그에 맞게 고르세요.';
@@ -1905,25 +1971,38 @@ app.get('/practice', requireAuth, (req, res) => {
           el.opTime.appendChild(o);
         });
 
-        // 신청 가능 대상 — 이번 문제 범위에 해당하는 행만 활성화
+        // 신청 가능 대상 — 학교급 3행 × 학년별 체크박스 (초 6 + 중 3 + 고 3 = 12개).
+        // 중·고 행은 늘 잠기고, 초등은 이번 문제의 학년만 열린다.
         el.grades.innerHTML = '';
         QUIZ.gradeRows.forEach(function (row) {
-          var on = row.key === quiz.range.row;
-          var lab = document.createElement('label');
-          lab.className = 'pf-grade' + (on ? '' : ' is-off');
-          var cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.className = 'pf-gradecb';
-          cb.value = row.key;
-          // 잠긴 행은 실제로 못 켜게 한다 (aria-disabled 로 안내 + change 에서 되돌림)
-          if (!on) {
-            cb.setAttribute('aria-disabled', 'true');
-            cb.addEventListener('click', function (e) { e.preventDefault(); });
-          }
-          var sp = document.createElement('span');
-          sp.textContent = row.label + (on ? '' : ' — 이번 모집 범위 아님');
-          lab.appendChild(cb); lab.appendChild(sp);
-          el.grades.appendChild(lab);
+          var rowEl = document.createElement('div');
+          rowEl.className = 'pf-graderow';
+          var lv = document.createElement('span');
+          lv.className = 'pf-gradelv';
+          lv.textContent = row.label;
+          var boxes = document.createElement('div');
+          boxes.className = 'pf-gradeboxes';
+          row.grades.forEach(function (g) {
+            var on = row.key === quiz.range.row && quiz.range.grades.indexOf(g) >= 0;
+            var lab = document.createElement('label');
+            lab.className = 'pf-gradebox' + (on ? '' : ' is-off');
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'pf-gradecb';
+            cb.value = row.key + '-' + g;
+            // 잠긴 칸은 실제로 못 켜게 한다 (진짜 disabled 를 쓰면 클릭 자체가 안 잡힌다)
+            if (!on) {
+              cb.setAttribute('aria-disabled', 'true');
+              cb.addEventListener('click', function (e) { e.preventDefault(); });
+            }
+            var sp = document.createElement('span');
+            sp.textContent = g + '학년';
+            lab.appendChild(cb); lab.appendChild(sp);
+            boxes.appendChild(lab);
+          });
+          rowEl.appendChild(lv);
+          rowEl.appendChild(boxes);
+          el.grades.appendChild(rowEl);
         });
 
         // 교육대상 — 7개를 전부 그대로, 전부 선택 가능하게 그린다.
@@ -1942,6 +2021,12 @@ app.get('/practice', requireAuth, (req, res) => {
           lab.appendChild(cb); lab.appendChild(sp);
           el.edus.appendChild(lab);
         });
+
+        // 신청 인원 옆 빨간 안내문. 상한이 20을 넘는 회차에는 'N명 이상 모집' 을 덧붙여
+        // 정답을 화면 안에서 찾을 수 있게 한다 (실제 화면의 고정 문구 + 이번 회차 정보).
+        el.countWarn.textContent =
+          '※ 20명 이내로 기입(한 학급에 20명 초과일 경우 운영기관과 사전 협의 필요)' +
+          (quiz.capOver ? ' — 이번 프로그램은 ' + quiz.cap + '명 이상 모집' : '');
 
         // 값 비우기
         el.addr.value = ''; el.addrDetail.value = '';
@@ -2123,6 +2208,17 @@ app.get('/practice', requireAuth, (req, res) => {
       el.agree1.addEventListener('change', syncAgreeAll);
       el.agree2.addEventListener('change', syncAgreeAll);
 
+      // [더보기] — label 안에 있으므로 그냥 두면 체크박스가 같이 토글된다.
+      // 약관 원문은 연습에 필요 없으니 안내만 띄우고 클릭을 여기서 끊는다.
+      var moreBtn = document.getElementById('pfMoreAll');
+      if (moreBtn) {
+        moreBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          saessak.toast('연습 화면이라 약관 원문은 싣지 않았습니다');
+        });
+      }
+
       // ---- 채점 ----
       // 반환: 틀린 항목 목록. 빈 배열이면 통과.
       function grade() {
@@ -2135,13 +2231,16 @@ app.get('/practice', requireAuth, (req, res) => {
         if (el.target.value !== '일반학교') {
           fail(el.target, '신청 교육 대상이 다릅니다 (정답: 일반학교)');
         }
+        // 신청 가능 대상 — 이번 모집 범위 안의 학년만, 하나 이상
         var checked = el.grades.querySelectorAll('.pf-gradecb:checked');
         if (!checked.length) {
           fail(el.grades, '신청 가능 대상을 하나도 고르지 않았습니다');
         } else {
+          var allowed = {};
+          quiz.range.grades.forEach(function (g) { allowed[quiz.range.row + '-' + g] = true; });
           for (var i = 0; i < checked.length; i++) {
-            if (checked[i].value !== quiz.range.row) {
-              fail(el.grades, '모집 범위 밖의 학년을 선택했습니다');
+            if (!allowed[checked[i].value]) {
+              fail(el.grades, '모집 범위 밖의 학년을 선택했습니다 (모집 범위: ' + quiz.range.label + ')');
               break;
             }
           }
@@ -3363,6 +3462,8 @@ function pageShell(title, body) {
     --vb-strong-bg:#E1F5EE; --vb-strong-fg:#0A6B52;
     --vb-ok-bg:#FBEED5;     --vb-ok-fg:#8A5A08;
     --vb-no-bg:#FCE4E3;     --vb-no-fg:#8A241F;
+    /* 신청 연습 폼 — 실제 신청 화면의 톤. 테마와 무관하게 고정한다. */
+    --pf-gray:#f5f5f5; --pf-border:#d8d8d8; --pf-brown:#6b4a2f; --pf-ink:#222;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -3790,59 +3891,102 @@ function pageShell(title, body) {
   .pr-recworst { font-size:12px; color:var(--text-muted); overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; }
   /* ================= 신청 폼 ================= */
-  .pf-info { background:var(--surface-1); border:1px solid var(--line); border-left:3px solid var(--green);
-    border-radius:11px; padding:12px 14px; margin-bottom:14px; }
-  .pf-info-title { font-size:13px; font-weight:800; margin-bottom:8px; }
-  .pf-info-list { display:grid; grid-template-columns:104px 1fr; margin:0; gap:0; }
-  .pf-info-list dt { font-size:12px; color:var(--text-secondary); font-weight:700; padding:4px 0; }
-  .pf-info-list dd { font-size:13px; font-weight:700; margin:0; padding:4px 0; overflow-wrap:anywhere; }
-  .pf-info-hint { margin-top:8px; font-size:12px; color:#8a5a08; font-weight:600; line-height:1.45; }
-  .pf-sec { border-top:1px solid var(--line); padding:13px 0 0; margin:0 0 13px; }
-  .pf-sec:first-of-type { border-top:none; padding-top:0; }
-  .pf-legend { font-size:13px; font-weight:800; margin-bottom:8px; display:flex;
-    align-items:center; gap:7px; flex-wrap:wrap; }
+  /* 실제 신청 화면의 배치·색만 참고했다. 이미지·로고는 쓰지 않는다.
+     이 폼은 라이트/다크 공통으로 실제 화면과 같은 밝은 톤을 유지한다 —
+     연습 대상이 '그 화면' 이므로 테마에 따라 색이 달라지면 연습이 안 된다. */
+  .pf-info { border:2px solid var(--green); border-radius:6px; padding:14px 16px; margin-bottom:18px;
+    background:#fff; }
+  .pf-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:0 22px; }
+  .pf-info-cell { display:grid; grid-template-columns:104px 1fr; align-items:baseline;
+    padding:6px 0; border-bottom:1px solid #ececec; min-width:0; }
+  .pf-info-k { font-size:12px; font-weight:800; color:var(--pf-ink); position:relative; padding-right:10px; }
+  /* 라벨과 값 사이 세로 구분선 */
+  .pf-info-k::after { content:''; position:absolute; right:0; top:1px; bottom:1px; width:1px;
+    background:var(--pf-border); }
+  .pf-info-v { font-size:13px; font-weight:400; color:#555; padding-left:10px;
+    overflow-wrap:anywhere; }
+  .pf-info-hint { margin-top:10px; font-size:12px; color:#c0392b; font-weight:600; line-height:1.45; }
+  .pf-sec { margin:0 0 18px; }
+  .pf-sec-title { display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+    font-size:15px; font-weight:800; color:var(--pf-ink); margin:0 0 0;
+    padding-bottom:7px; border-bottom:3px solid var(--green); background:transparent; }
+  .pf-sec-ico { font-size:14px; }
+  .pf-sec-body { background:var(--pf-gray); border:1px solid var(--pf-border); border-top:none;
+    padding:16px 18px; }
   .pf-req { color:#d9534f; }
   .pf-must { color:#d9534f; }
-  .pf-tag { font-size:11px; font-weight:600; color:var(--text-muted); background:var(--surface-1);
-    border:1px solid var(--line); padding:2px 7px; border-radius:999px; }
-  .pf-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
-  .pf-field { display:flex; flex-direction:column; gap:5px; min-width:0; }
-  .pf-label { font-size:12px; font-weight:700; color:var(--text-secondary); }
-  .pf-in { width:100%; min-width:0; font:inherit; font-size:14px; padding:10px 11px;
-    border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--ink); }
+  .pf-tag { font-size:11px; font-weight:600; color:#6b6b6b; background:#fff;
+    border:1px solid var(--pf-border); padding:2px 7px; border-radius:999px; }
+  /* 폼 행: 좌 라벨열 고정 폭 + 우 입력열 */
+  .pf-row { display:grid; grid-template-columns:150px 1fr; gap:12px; align-items:start;
+    padding:9px 0; }
+  .pf-row + .pf-row { border-top:1px solid #e6e6e6; }
+  .pf-rowlabel { font-size:13px; font-weight:700; color:var(--pf-ink); padding-top:9px;
+    line-height:1.4; }
+  .pf-rowfield { min-width:0; }
+  .pf-note { font-size:12px; color:#6b6b6b; line-height:1.5; margin-top:6px; }
+  .pf-in { width:100%; min-width:0; font:inherit; font-size:14px; padding:9px 11px;
+    border:1px solid var(--pf-border); border-radius:2px; background:#fff; color:#1c2a22; }
   .pf-in:focus { outline:2px solid var(--green); outline-offset:-1px; }
-  .pf-in[readonly] { background:var(--surface-1); color:var(--text-muted); cursor:default; }
-  .pf-in-sm { max-width:88px; }
+  .pf-in[readonly] { background:#ececec; color:#6b6b6b; cursor:default; }
+  .pf-in-sm { max-width:92px; flex-shrink:0; }
+  .pf-in-num { max-width:110px; }
   .pf-ta { resize:vertical; line-height:1.5; }
-  .pf-bad { border-color:#d9534f !important; background:#fdeaea; }
-  .pf-addr-row { display:flex; gap:8px; align-items:center; }
+  .pf-bad { border-color:#d9534f !important; background:#fdeaea !important; }
+  /* 보조 버튼 (주소 검색·오늘·정형문구) — 각진 회색 */
+  .pf-btn-sub { font:inherit; font-size:13px; font-weight:600; padding:9px 13px; cursor:pointer;
+    background:#e9e9e9; color:#333; border:1px solid var(--pf-border); border-radius:2px;
+    white-space:nowrap; flex-shrink:0; }
+  .pf-btn-sub:hover { background:#dedede; }
+  .pf-inline { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .pf-unit { font-size:13px; color:var(--pf-ink); flex-shrink:0; }
+  .pf-warn { font-size:12px; color:#c0392b; line-height:1.45; }
+  .pf-addr-row { display:flex; gap:7px; align-items:center; }
   .pf-addr-row .pf-in { flex:1; }
-  .pf-addr-row .btn { white-space:nowrap; }
-  .pf-grades { display:grid; gap:7px; }
-  .pf-grade { display:flex; align-items:center; gap:9px; padding:10px 12px; border-radius:10px;
-    background:var(--surface-1); border:1px solid var(--line); font-size:13px; cursor:pointer; }
-  .pf-grade input { accent-color:var(--green); width:16px; height:16px; }
-  .pf-grade.is-off { opacity:.45; cursor:not-allowed; }
-  .pf-grade.is-off input { cursor:not-allowed; }
+  /* 신청 가능 대상 — 학교급 라벨 + 학년 체크박스 가로 균등 */
+  .pf-grades { display:grid; gap:6px; }
+  .pf-graderow { display:grid; grid-template-columns:76px 1fr; gap:10px; align-items:center;
+    background:#fff; border:1px solid var(--pf-border); border-radius:2px; padding:8px 10px; }
+  .pf-gradelv { font-size:13px; font-weight:700; color:var(--pf-ink); }
+  .pf-gradeboxes { display:flex; gap:6px; flex-wrap:wrap; }
+  .pf-gradebox { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;
+    flex:1 1 0; min-width:74px; color:var(--pf-ink); }
+  .pf-gradebox input { accent-color:var(--green); width:15px; height:15px; flex-shrink:0; }
+  .pf-gradebox.is-off { opacity:.4; cursor:not-allowed; }
+  .pf-gradebox.is-off input { cursor:not-allowed; }
   /* 교육대상 7개 — 전부 활성. 잠긴 항목이 없으므로 is-off 대응 규칙도 두지 않는다. */
-  .pf-edus { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
-  .pf-edu { display:flex; align-items:center; gap:8px; padding:9px 11px; border-radius:10px;
-    background:var(--surface-1); border:1px solid var(--line); font-size:13px; cursor:pointer;
-    min-width:0; }
-  .pf-edu input { accent-color:var(--green); width:16px; height:16px; flex-shrink:0; }
+  .pf-edus { display:grid; grid-template-columns:1fr 1fr; gap:6px;
+    background:#fff; border:1px solid var(--pf-border); border-radius:2px; padding:9px 11px; }
+  .pf-edu { display:flex; align-items:center; gap:7px; font-size:13px; cursor:pointer; min-width:0;
+    color:var(--pf-ink); }
+  .pf-edu input { accent-color:var(--green); width:15px; height:15px; flex-shrink:0; }
   .pf-edu span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .pf-datewrap { display:flex; align-items:center; gap:10px; }
-  .pf-datewrap .pf-label { min-width:32px; }
-  .pf-daterow { display:flex; gap:7px; flex:1; min-width:0; }
-  .pf-daterow .pf-in:first-child { flex:1; min-width:0; }
-  .pf-agree { display:flex; align-items:center; gap:9px; padding:10px 12px; border-radius:10px;
-    border:1px solid var(--line); font-size:13px; cursor:pointer; margin-bottom:6px; }
-  .pf-agree input { accent-color:var(--green); width:16px; height:16px; }
-  .pf-agree-all { background:var(--surface-1); font-weight:700; }
-  .pf-submitmsg { min-height:18px; font-size:12px; text-align:center; margin:4px 0 8px; }
+  /* 교육 시작일/종료일 2열 */
+  .pf-dates2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .pf-datecell { min-width:0; }
+  .pf-datecap { display:block; font-size:12px; font-weight:700; color:var(--pf-ink); margin-bottom:5px; }
+  .pf-daterow { display:flex; gap:5px; align-items:center; flex-wrap:wrap; }
+  .pf-daterow .pf-in:first-child { flex:1 1 130px; min-width:0; }
+  .pf-agree { display:flex; align-items:center; gap:9px; padding:9px 11px; font-size:13px;
+    cursor:pointer; background:#fff; border:1px solid var(--pf-border); border-radius:2px;
+    margin-bottom:6px; color:var(--pf-ink); }
+  .pf-agree:last-child { margin-bottom:0; }
+  .pf-agree input { accent-color:var(--green); width:16px; height:16px; flex-shrink:0; }
+  .pf-agree-all { font-weight:700; background:#efefef; }
+  .pf-more { margin-left:auto; font:inherit; font-size:12px; font-weight:600; color:#555;
+    background:transparent; border:1px solid var(--pf-border); border-radius:2px;
+    padding:3px 9px; cursor:pointer; }
+  .pf-more:hover { background:#e6e6e6; }
+  .pf-submitmsg { min-height:18px; font-size:12px; text-align:center; margin:4px 0 10px; }
   .pf-submitmsg-warn { color:#a33; font-weight:700; }
-  .pf-actions { display:flex; gap:9px; }
-  .pf-actions .btn { flex:1; padding:14px; font-size:15px; }
+  /* 하단 버튼 — 가운데 정렬, 폭 넓게 */
+  .pf-actions { display:flex; gap:10px; justify-content:center; }
+  .pf-btn { font:inherit; font-size:15px; font-weight:700; padding:14px 10px; cursor:pointer;
+    border-radius:3px; border:1px solid transparent; min-width:150px; flex:0 1 190px; }
+  .pf-btn-cancel { background:#9a9a9a; color:#fff; }
+  .pf-btn-cancel:hover { background:#888; }
+  .pf-btn-submit { background:var(--pf-brown); color:#fff; }
+  .pf-btn-submit:hover { background:#573a24; }
   /* ---- 주소 검색 모달 ---- */
   .pf-modal { position:fixed; inset:0; z-index:60; display:flex; align-items:center;
     justify-content:center; padding:16px; }
@@ -3870,12 +4014,12 @@ function pageShell(title, body) {
   .pf-jibun { font-size:11px; color:var(--text-muted); overflow-wrap:anywhere; }
   @media (prefers-color-scheme: dark) {
     .pr-tip { background:#2a2416; border-color:#4a3f22; color:#e8d7ab; }
-    .pf-bad { background:#3a1f1f; }
+    /* 신청 폼(.pf-sec-body 아래)은 다크에서도 실제 화면과 같은 밝은 톤을 유지한다 —
+       .pf-bad / .pf-info-hint 를 어둡게 덮지 않는다. */
     .pf-result:hover { background:#17301f; border-color:#2b5c3c; }
     .pr-result-dq { background:#3a1f1f; border-color:#5c2b2b; }
     .pr-dqtag { background:#241414; border-color:#5c2b2b; color:#f0b4b4; }
     .pr-badlist { background:#2a1818; border-color:#5c2b2b; color:#f0c4c4; }
-    .pf-info-hint { color:#e0bd7a; }
   }
   /* ---- 기록 ---- */
   .pr-best { font-size:13px; margin:11px 0 9px; }
@@ -3918,19 +4062,30 @@ function pageShell(title, body) {
     .pr-recms { order:2; text-align:right; }
     .pr-recworst { order:3; grid-column:1; text-align:left; }
     .pr-recdq { order:4; grid-column:2; text-align:right; }
-    /* 폼 */
-    .pf-grid2 { grid-template-columns:1fr; }
+    /* ---- 폼: 좁은 화면에서는 라벨열을 위로 접어 1열로 ---- */
+    .pf-info { padding:11px 12px; }
+    .pf-info-grid { grid-template-columns:1fr; gap:0; }
+    .pf-info-cell { grid-template-columns:92px 1fr; }
+    .pf-sec-body { padding:12px 13px; }
+    .pf-row { grid-template-columns:1fr; gap:5px; }
+    .pf-rowlabel { padding-top:0; }
     .pf-edus { grid-template-columns:1fr; }
-    .pf-info-list { grid-template-columns:88px 1fr; }
-    .pf-datewrap { flex-direction:column; align-items:stretch; gap:5px; }
-    .pf-datewrap .pf-label { min-width:0; }
+    /* 학년 체크박스: 학교급 라벨을 위로, 학년은 3열로 */
+    .pf-graderow { grid-template-columns:1fr; gap:6px; }
+    .pf-gradeboxes { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; }
+    .pf-gradebox { min-width:0; }
+    .pf-dates2 { grid-template-columns:1fr; gap:10px; }
     .pf-daterow { flex-wrap:wrap; }
     .pf-daterow .pf-in:first-child { flex:1 1 100%; }
-    .pf-in-sm { flex:1; max-width:none; }
+    .pf-in-sm { flex:1 1 0; max-width:none; }
+    .pf-in-num { max-width:none; }
     .pf-addr-row { flex-wrap:wrap; }
     .pf-addr-row .pf-in { flex:1 1 100%; }
-    .pf-addr-row .btn { width:100%; }
-    .pf-actions .btn { padding:13px; font-size:14px; }
+    .pf-addr-row .pf-btn-sub { width:100%; }
+    .pf-inline { align-items:flex-start; }
+    .pf-warn { flex:1 1 100%; }
+    .pf-actions { flex-direction:column; }
+    .pf-btn { width:100%; min-width:0; flex:none; padding:13px; font-size:14px; }
     .pf-modal { padding:10px; }
     .pf-modal-box { padding:13px; }
     /* 구간 막대: 라벨을 위로 올리고 막대+값을 아래 줄에 */
