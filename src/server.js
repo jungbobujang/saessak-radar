@@ -1593,11 +1593,14 @@ app.get('/practice', requireAuth, (req, res) => {
 
       <!-- 8) 교육 시작일 / 종료일 -->
       <section class="pf-sec">
-        <div class="pf-legend">8. 교육 시작일 / 종료일 <b class="pf-req">*</b></div>
+        <div class="pf-legend">8. 교육 시작일 / 종료일 <b class="pf-req">*</b>
+          <span class="pf-tag">형식만 채우면 통과 · 앞뒤 순서 안 봄</span>
+        </div>
         <div class="pf-datewrap">
           <span class="pf-label">시작</span>
           <div class="pf-daterow">
             <input class="pf-in" id="pfStartDate" type="date">
+            <button type="button" class="btn btn-sm btn-ghost pf-today" id="pfStartToday">오늘</button>
             <select class="pf-in pf-in-sm" id="pfStartH"></select>
             <select class="pf-in pf-in-sm" id="pfStartM"></select>
           </div>
@@ -1606,9 +1609,13 @@ app.get('/practice', requireAuth, (req, res) => {
           <span class="pf-label">종료</span>
           <div class="pf-daterow">
             <input class="pf-in" id="pfEndDate" type="date">
+            <button type="button" class="btn btn-sm btn-ghost pf-today" id="pfEndToday">오늘</button>
             <select class="pf-in pf-in-sm" id="pfEndH"></select>
             <select class="pf-in pf-in-sm" id="pfEndM"></select>
           </div>
+        </div>
+        <div class="muted small" style="margin-top:7px;">
+          날짜칸에 숫자만 이어서 쳐도 됩니다 (예: 20260901). 시·분은 09시 00분이 미리 들어가 있습니다.
         </div>
       </section>
 
@@ -1711,6 +1718,8 @@ app.get('/practice', requireAuth, (req, res) => {
         count: document.getElementById('pfCount'),
         sessions: document.getElementById('pfSessions'),
         startDate: document.getElementById('pfStartDate'),
+        startToday: document.getElementById('pfStartToday'),
+        endToday: document.getElementById('pfEndToday'),
         startH: document.getElementById('pfStartH'),
         startM: document.getElementById('pfStartM'),
         endDate: document.getElementById('pfEndDate'),
@@ -1939,6 +1948,10 @@ app.get('/practice', requireAuth, (req, res) => {
         el.target.value = '';
         el.count.value = ''; el.sessions.value = '';
         el.startDate.value = ''; el.endDate.value = '';
+        // 시·분은 09:00 을 미리 넣어 둔다. 실전에서도 날짜는 승인 후 협의로 조정되니
+        // 여기서 셀렉트를 두 번 여는 시간이 아깝다 — 손대지 않고 넘어가도 통과한다.
+        el.startH.value = '09'; el.startM.value = '00';
+        el.endH.value = '09'; el.endM.value = '00';
         el.opTime.value = '';
         el.note.value = '';
         el.agreeAll.checked = false; el.agree1.checked = false; el.agree2.checked = false;
@@ -2034,6 +2047,61 @@ app.get('/practice', requireAuth, (req, res) => {
         if (e.key === 'Escape' && !el.modal.hidden) closeModal();
       });
 
+      // ---- [오늘] 버튼 ----
+      // 실전에서 날짜는 승인 뒤 협의로 조정된다. 정확한 날을 고르느라 달력을 뒤지는 대신
+      // 오늘로 찍고 넘어가는 게 빠르다 — 그 요령을 버튼으로 만들어 둔다.
+      function todayYmd() {
+        var d = new Date();
+        var p = function (n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      }
+      function setToday(input) {
+        input.value = todayYmd();
+        input.classList.remove('pf-bad');
+        // 직접 값을 넣으면 input 이벤트가 안 나므로 구간 계측용으로 직접 쏜다
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      el.startToday.addEventListener('click', function () { setToday(el.startDate); });
+      el.endToday.addEventListener('click', function () { setToday(el.endDate); });
+
+      // ---- 날짜칸 숫자 입력 (20260901 → 2026-09-01) ----
+      // input[type=date] 는 숫자 키를 그냥 흘려버린다(실측 확인). 그래서 자리 이동 없이
+      // 여덟 자리를 이어 치는 실전 요령이 안 먹는다. 키를 가로채서 직접 채운다.
+      // type=date 는 그대로 두므로 달력 선택기와 [오늘] 버튼은 함께 살아 있다.
+      function attachDigitEntry(input) {
+        var buf = '';
+        function reset() { buf = ''; }
+        input.addEventListener('focus', reset);
+        input.addEventListener('blur', reset);
+        input.addEventListener('keydown', function (e) {
+          if (e.ctrlKey || e.metaKey || e.altKey) return;   // 복사·붙여넣기 등은 건드리지 않는다
+          if (e.key === 'Backspace' || e.key === 'Delete') {
+            e.preventDefault();
+            reset();
+            if (input.value) {
+              input.value = '';
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return;
+          }
+          if (e.key < '0' || e.key > '9' || e.key.length !== 1) return; // 숫자만 가로챈다
+          e.preventDefault();
+          buf += e.key;
+          if (buf.length < 8) return;
+          var ymd = buf.slice(0, 4) + '-' + buf.slice(4, 6) + '-' + buf.slice(6, 8);
+          reset();
+          // 말이 안 되는 날짜(13월 등)는 value 세터가 알아서 '' 로 되돌린다.
+          input.value = ymd;
+          input.classList.remove('pf-bad');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      }
+      attachDigitEntry(el.startDate);
+      attachDigitEntry(el.endDate);
+
       // ---- 정형문구 ----
       el.boiler.addEventListener('click', function () {
         el.note.value = ${JSON.stringify(PRACTICE_QUIZ.boilerplate)};
@@ -2107,13 +2175,24 @@ app.get('/practice', requireAuth, (req, res) => {
         if (Number(el.sessions.value) !== quiz.sessions) {
           fail(el.sessions, '총 교육 차시가 다릅니다 (정답: ' + quiz.sessions + '차시)');
         }
-        // 날짜·시각은 형식만 본다 (값 검증 없음)
-        if (!el.startDate.value || !el.startH.value || !el.startM.value) {
-          fail(el.startDate, '교육 시작일시를 다 채우지 않았습니다');
+        // 날짜·시각은 '채워졌는가' 만 본다.
+        // 값의 타당성은 보지 않는다 — 종료일이 시작일보다 앞서도 통과시킨다.
+        // 실전에서도 막지 않고, 승인 뒤 협의로 조정되기 때문이다.
+        // 비었을 때는 어느 칸이 비었는지 짚어 준다 (날짜/시/분).
+        function checkDateTrio(which, dateEl, hEl, mEl) {
+          var missing = [];
+          if (!dateEl.value) missing.push('날짜');
+          if (!hEl.value) missing.push('시');
+          if (!mEl.value) missing.push('분');
+          if (!missing.length) return;
+          // 비어 있는 칸만 붉게 표시한다
+          if (!dateEl.value) dateEl.classList.add('pf-bad');
+          if (!hEl.value) hEl.classList.add('pf-bad');
+          if (!mEl.value) mEl.classList.add('pf-bad');
+          bad.push('교육 ' + which + '의 ' + missing.join('·') + ' 칸이 비었습니다');
         }
-        if (!el.endDate.value || !el.endH.value || !el.endM.value) {
-          fail(el.endDate, '교육 종료일시를 다 채우지 않았습니다');
-        }
+        checkDateTrio('시작일시', el.startDate, el.startH, el.startM);
+        checkDateTrio('종료일시', el.endDate, el.endH, el.endM);
         if (el.opTime.value !== quiz.opAnswer) {
           fail(el.opTime, '운영시간이 다릅니다 (정답: ' + quiz.opAnswer + ')');
         }
@@ -2240,6 +2319,15 @@ app.get('/practice', requireAuth, (req, res) => {
             '</div>';
         }).join('');
 
+        // 날짜 구간(3구간)이 전체의 40% 이상이면 요령을 한 줄 붙인다.
+        // 정확한 날짜를 고르느라 시간을 쓰는 게 이 구간이 길어지는 전형적 이유다.
+        var DATE_SEG = 2;
+        var dateShare = totalMs > 0 ? durs[DATE_SEG] / totalMs : 0;
+        var tipHtml = dateShare >= 0.4
+          ? '<div class="pr-tip">💡 날짜는 승인 후 협의로 조정됩니다. 형식만 채우고 넘어가는 게 빠릅니다. ' +
+            '<span class="muted small">(날짜·운영시간 구간이 전체의 ' + Math.round(dateShare * 100) + '%)</span></div>'
+          : '';
+
         var badHtml = dq
           ? '<div class="pr-badlist"><b>틀린 항목 ' + bad.length + '개</b><ul>' +
             bad.map(function (b) { return '<li>' + b + '</li>'; }).join('') +
@@ -2262,6 +2350,7 @@ app.get('/practice', requireAuth, (req, res) => {
           '<div class="pr-segs">' + segHtml + '</div>' +
           '<div class="pr-worst">⏱ <b>' + SEG_LABELS[worstIdx] + '</b> 에서 가장 많이 지체됐습니다 (' +
             fmtSec(durs[worstIdx]) + '초)</div>' +
+          tipHtml +
           badHtml;
 
         setStatus(dq
@@ -3688,6 +3777,9 @@ function pageShell(title, body) {
   .pr-seg-worst .pr-seg-label { color:#8a5a08; font-weight:700; }
   .pr-seg-worst .pr-seg-bar i { background:var(--gauge-pend); }
   .pr-worst { margin-top:10px; font-size:13px; color:var(--text-secondary); }
+  .pr-tip { margin-top:9px; padding:10px 13px; border-radius:10px; font-size:13px; line-height:1.5;
+    background:#fff6e6; border:1px solid #f0dcae; color:#7a5200; }
+  .pf-today { white-space:nowrap; flex-shrink:0; }
   .pr-badlist { margin-top:11px; padding:11px 13px; border-radius:10px;
     background:#fdeaea; border:1px solid #f3caca; color:#7a2020; font-size:13px; }
   .pr-badlist ul { margin:6px 0 0; padding-left:18px; }
@@ -3777,6 +3869,7 @@ function pageShell(title, body) {
   .pf-road { font-size:13px; font-weight:700; overflow-wrap:anywhere; }
   .pf-jibun { font-size:11px; color:var(--text-muted); overflow-wrap:anywhere; }
   @media (prefers-color-scheme: dark) {
+    .pr-tip { background:#2a2416; border-color:#4a3f22; color:#e8d7ab; }
     .pf-bad { background:#3a1f1f; }
     .pf-result:hover { background:#17301f; border-color:#2b5c3c; }
     .pr-result-dq { background:#3a1f1f; border-color:#5c2b2b; }
