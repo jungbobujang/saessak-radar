@@ -678,6 +678,56 @@ app.get('/', (req, res) => {
         }
       }
       renderPermInline();
+
+      // ---- 신청 플래너: 잔여 기준 정렬·필터 ----
+      // 서버는 '잔여 많은 순'으로 그려 보낸다. 여기서는 그 순서를 다시 세우기만 한다.
+      // 잔여 적은 순 = 자리가 얼마 안 남은 순 = 경쟁이 치열한 순이다.
+      (function planTools() {
+        var box = document.getElementById('liveRows');
+        if (!box) return;
+        var empty = document.getElementById('liveEmpty');
+        var rows = Array.prototype.slice.call(box.querySelectorAll('.planrow'));
+        var sortMode = 'many';
+        var openOnly = false;
+        var remainOf = function (el) { return parseInt(el.getAttribute('data-remain'), 10); };
+
+        function apply() {
+          var shown = rows.filter(function (r) {
+            if (!openOnly) return true;
+            var v = remainOf(r);
+            return v > 0;                       // 정원 미공개(-1)와 잔여 0은 숨긴다
+          });
+          shown.sort(function (a, b) {
+            var av = remainOf(a), bv = remainOf(b);
+            // 정원 미공개(-1)는 어느 정렬에서든 맨 뒤
+            if (av < 0 && bv >= 0) return 1;
+            if (bv < 0 && av >= 0) return -1;
+            return sortMode === 'few' ? av - bv : bv - av;
+          });
+          rows.forEach(function (r) { r.hidden = true; });
+          shown.forEach(function (r) { r.hidden = false; box.appendChild(r); });
+          if (empty) empty.hidden = shown.length > 0;
+        }
+
+        document.querySelectorAll('[data-rs]').forEach(function (b) {
+          b.addEventListener('click', function () {
+            sortMode = b.getAttribute('data-rs');
+            document.querySelectorAll('[data-rs]').forEach(function (o) {
+              o.classList.toggle('on', o === b);
+            });
+            apply();
+          });
+        });
+        var ff = document.querySelector('[data-rf="open"]');
+        if (ff) {
+          ff.addEventListener('click', function () {
+            openOnly = !openOnly;
+            ff.classList.toggle('on', openOnly);
+            ff.setAttribute('aria-pressed', openOnly ? 'true' : 'false');
+            apply();
+          });
+        }
+      })();
     </script>
   `));
 });
@@ -3206,14 +3256,20 @@ function capacityOf(x) {
 
   const app = appRaw || 0;
   const pend = pendRaw || 0;
-  const realRemain = Math.max(0, cap - app - pend);
+  // raw 는 클램프 전 원값. 음수면 정원보다 많이 접수된 것(초과 접수)이라
+  // 0 으로 지워 버리지 않고 초과분을 따로 들고 나간다.
+  const raw = cap - app - pend;
+  const realRemain = Math.max(0, raw);
+  const over = raw < 0 ? -raw : 0;
   const full = realRemain === 0; // 정원+대기가 정원 이상 → 지금 신청하면 대기만
   return {
     cap,
     app,
     pend,
     hasNumbers: appRaw != null, // 승인 수치가 아직 안 열린 건(오픈 전 등) 구분용
+    raw,
     realRemain,
+    over,
     full,
     appPct: Math.round((app / cap) * 100),
     pendPct: Math.round((pend / cap) * 100),
@@ -3287,11 +3343,24 @@ function railDdayHtml(dd) {
       <div class="rail-label">오픈까지</div></div>`;
 }
 
-// 게이지 우측 수치 텍스트. 숫자와 라벨을 띄워 읽기 쉽게, 대기 0이면 항목 자체를 뺀다.
+// 게이지 우측 수치 텍스트.
+// 맨 앞에 '잔여 N학급' 을 굵게 세우고, 원 수치는 괄호로 뒤에 붙인다 —
+// 정원 숫자만 보고 여유 있다고 오판하는 걸 막는 게 이 표기의 목적이다.
+// 승인 수치가 아직 안 열린 건은 잔여를 단정하지 않고 '미집계' 로 구분한다.
 function capText(c) {
+  if (!c.hasNumbers) {
+    return `<b class="cap-remain cap-remain-un">잔여 ${c.cap}학급</b>` +
+      `<span class="cap-tag cap-tag-un">미집계</span>` +
+      `<span class="cap-detail">(정원 ${c.cap})</span>`;
+  }
   const parts = [`정원 ${c.cap}`, `승인 ${c.app}`];
   if (c.pend > 0) parts.push(`대기 ${c.pend}`);
-  return parts.join(' · ');
+  const detail = `<span class="cap-detail">(${parts.join(' · ')})</span>`;
+  if (c.over > 0) {
+    return `<b class="cap-remain cap-remain-0">잔여 0학급</b>` +
+      `<span class="cap-tag cap-tag-over">초과 접수 ${c.over}</span>${detail}`;
+  }
+  return `<b class="cap-remain${c.realRemain === 0 ? ' cap-remain-0' : ''}">잔여 ${c.realRemain}학급</b>${detail}`;
 }
 
 // 3단 게이지 + 우측 수치 텍스트 ("정원 13 · 승인 5 · 대기 1")
@@ -3432,7 +3501,10 @@ function renderPlanner() {
       const capRow = !c
         ? ''
         : preOpen
-        ? `<div class="pi-cap"><span class="metabit">${icon('users')}${c.cap}학급 오픈 전</span></div>`
+        ? `<div class="pi-cap"><span class="metabit">${icon('users')}${
+            // 잔여 기준으로 적는다. 승인 수치가 아직 안 열린 건(미집계)만 기존대로 정원을 쓴다.
+            c.hasNumbers ? `${c.realRemain}학급 오픈 전` : `${c.cap}학급 오픈 전 (미집계)`
+          }</span></div>`
         : gaugeHtml(c);
       const rate = ratingOf(x.institution, s);
       return `<a class="planrow ${rate.dim ? 'planrow-skip' : ''}" href="${escapeHtml(
@@ -3457,9 +3529,11 @@ function renderPlanner() {
         .filter(Boolean)
         .join('<span class="metasep">·</span>');
       const rate = ratingOf(x.institution, s);
+      // data-remain: 잔여 정렬·필터용. 정원 미공개(-1)는 정렬에서 맨 뒤로 보낸다.
       return `<a class="planrow ${c && c.full ? 'planrow-dim' : ''} ${
         rate.dim ? 'planrow-skip' : ''
-      }" href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
+      }" data-remain="${c ? c.realRemain : -1}" data-metered="${c && c.hasNumbers ? '1' : '0'}"
+         href="${escapeHtml(x.link || '#')}" target="_blank" rel="noopener">
         ${railHtml(c)}
         <div class="pi-body">
           ${cardHead(x, s)}
@@ -3487,7 +3561,15 @@ function renderPlanner() {
   const liveSection = live.length
     ? `<div class="plan-group">
         <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">${live.length}</span></div>
-        ${liveRows}
+        <div class="plan-tools">
+          <span class="plan-toolslabel">정렬</span>
+          <button type="button" class="fchip on" data-rs="many">잔여 많은 순</button>
+          <button type="button" class="fchip" data-rs="few">잔여 적은 순 (경쟁 치열)</button>
+          <span class="plan-toolssep"></span>
+          <button type="button" class="fchip" data-rf="open" aria-pressed="false">잔여 있는 것만</button>
+        </div>
+        <div id="liveRows">${liveRows}</div>
+        <div class="muted small plan-empty" id="liveEmpty" hidden>조건에 맞는 프로그램이 없습니다.</div>
       </div>`
     : `<div class="plan-group plan-group-min">
         <div class="plan-group-title">🔥 지금 신청 가능 <span class="muted small">현재 없음</span></div>
@@ -3739,6 +3821,20 @@ function pageShell(title, body) {
   .g3-app { background:var(--gauge-app); }
   .g3-pend { background:var(--gauge-pend); }
   .g3-full .g3-app, .g3-full .g3-pend { background:var(--gauge-full); }
+  /* 잔여 표기 — 잔여를 맨 앞에 굵게, 원 수치는 뒤에 흐리게 */
+  .cap-remain { color:var(--green-d); font-weight:800; margin-right:5px; white-space:nowrap; }
+  .cap-remain-0 { color:var(--gauge-full); }
+  .cap-remain-un { color:var(--text-secondary); }
+  .cap-detail { color:var(--text-muted); }
+  .cap-tag { font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;
+    margin-right:5px; white-space:nowrap; }
+  .cap-tag-over { background:#fdeaea; color:#a33; }
+  .cap-tag-un { background:var(--surface-1); color:var(--text-muted); }
+  /* 플래너 정렬·필터 줄 */
+  .plan-tools { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:0 0 9px; }
+  .plan-toolslabel { font-size:12px; color:var(--text-muted); font-weight:700; }
+  .plan-toolssep { width:1px; height:16px; background:var(--line); margin:0 3px; }
+  .plan-empty { padding:10px 0; }
   .g3-text { font-size:11px; color:var(--text-muted); white-space:nowrap; }
   /* 기관 평가 표식 (업체명 앞) — 판정 배지 → 종합점수 → 하트, 사이 4px */
   .imark { flex:none; display:inline-flex; align-items:center; gap:4px; cursor:help; }
@@ -4132,6 +4228,7 @@ function pageShell(title, body) {
   .pf-road { font-size:13px; font-weight:700; overflow-wrap:anywhere; }
   .pf-jibun { font-size:11px; color:var(--text-muted); overflow-wrap:anywhere; }
   @media (prefers-color-scheme: dark) {
+    .cap-tag-over { background:#3a1f1f; color:#f0b4b4; }
     .pr-tip { background:#2a2416; border-color:#4a3f22; color:#e8d7ab; }
     /* 신청 폼(.pf-sec-body 아래)은 다크에서도 실제 화면과 같은 밝은 톤을 유지한다 —
        .pf-bad / .pf-info-hint 를 어둡게 덮지 않는다. */

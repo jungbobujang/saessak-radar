@@ -235,10 +235,15 @@ async function sendTelegram(html, opts = {}) {
 function capacityText(card) {
   const cap = card.capacityClasses;
   if (cap == null || cap <= 0) return '';
+  // 승인 수치가 아직 안 열린 건은 잔여를 단정하지 않는다 (대시보드 capacityOf 와 같은 기준)
+  if (card.approvedClasses == null) return `잔여 ${cap}학급 · 미집계 (정원 ${cap})`;
   const app = card.approvedClasses || 0;
   const pend = card.pendingClasses || 0;
-  const real = Math.max(0, cap - app - pend);
-  return `실질 잔여 ${real}학급 (정원 ${cap}·승인 ${app}·대기 ${pend})`;
+  const raw = cap - app - pend;
+  const real = Math.max(0, raw);
+  const tail = `(정원 ${cap}·승인 ${app}·대기 ${pend})`;
+  if (raw < 0) return `잔여 0학급 · 초과 접수 ${-raw} ${tail}`;
+  return `잔여 ${real}학급 ${tail}`;
 }
 
 function buildMessage(kind, card) {
