@@ -659,21 +659,24 @@ async function selfRestart(kind, reasonText, telegramHtml) {
 // 수집 락이 풀린 뒤에만 부른다 — 도는 수집을 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
 function maybeSelfRestartOnFailStreak() {
   if (!SELF_RESTART_AFTER_FAILS || restarting) return;
-  // 갓 태어난 프로세스는 버리지 않는다 (위 MIN_UPTIME_FOR_RESTART_MS 주석 참고).
-  const upMs = Date.now() - bootMs;
-  if (upMs < MIN_UPTIME_FOR_RESTART_MS) {
-    console.warn(
-      `[restart] 연속 실패 ${heartbeat.failStreak || 0}회지만 기동한 지 ` +
-        `${Math.round(upMs / 60000)}분뿐입니다 — 이번에는 재기동하지 않습니다 ` +
-        `(최소 ${Math.round(MIN_UPTIME_FOR_RESTART_MS / 60000)}분)`
-    );
-    return;
-  }
   const streak = heartbeat.failStreak || 0;
   // 마지막 재기동 이후로 다시 임계만큼 쌓였을 때만. failStreak 는 재기동해도 파일에
   // 남아 있으므로, 이 뺄셈이 없으면 부활 직후 실패 1회에 또 나가는 재기동 루프가 된다.
   const since = streak - (heartbeat.failStreakAtLastRestart || 0);
   if (streak < SELF_RESTART_AFTER_FAILS || since < SELF_RESTART_AFTER_FAILS) return;
+
+  // 갓 태어난 프로세스는 버리지 않는다 (위 MIN_UPTIME_FOR_RESTART_MS 주석 참고).
+  // 임계값 검사보다 뒤에 둔다 — 앞에 두면 애초에 재기동 대상이 아닌 사이클마다
+  // ("연속 실패 1회지만 재기동하지 않습니다") 경고가 찍혀 로그가 무의미해진다.
+  const upMs = Date.now() - bootMs;
+  if (upMs < MIN_UPTIME_FOR_RESTART_MS) {
+    console.warn(
+      `[restart] 연속 실패 ${streak}회로 재기동 조건을 채웠지만 기동한 지 ` +
+        `${Math.round(upMs / 60000)}분뿐입니다 — 이번에는 넘어갑니다 ` +
+        `(최소 ${Math.round(MIN_UPTIME_FOR_RESTART_MS / 60000)}분)`
+    );
+    return;
+  }
 
   const nowMs = Date.now();
   const done = selfRestartsToday(nowMs);
