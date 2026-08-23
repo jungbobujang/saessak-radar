@@ -77,43 +77,162 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
+// ---- 크로뮴 launch 인자 (메모리 감량) --------------------------------------
+// 헤드리스 수집에만 쓰는 브라우저다. 화면에 그릴 일도, 사람이 볼 일도 없다.
+// 아래 인자는 전부 '수집 결과(카드 배열)를 바꾸지 않는 것' 만 골랐다.
+// 데이터는 page.evaluate 안의 fetch(JSON) 로 받으므로 렌더링 계열을 꺼도 영향이 없다.
+//
+// 주의 ① --single-process 는 쓰지 않는다. 메모리는 가장 많이 줄지만 크로뮴이 자주
+//        죽어 수집이 통째로 실패한다. 대신 --renderer-process-limit=1 로 렌더러만 묶는다.
+// 주의 ② --disable-features=... 를 직접 넘기지 않는다. Playwright 가 이미 자체 목록을
+//        넘기고 있고, 같은 스위치를 또 주면 뒤엣것이 앞엣것을 통째로 덮어써서
+//        Playwright 가 끈 기능들이 되살아난다(동작이 미묘하게 바뀐다).
+// 주의 ③ --disable-dev-shm-usage 는 Playwright 기본값에도 이미 들어 있다.
+//        의도를 남기기 위해 그대로 둔다(중복이라 부작용은 없다).
+const LAUNCH_ARGS = [
+  '--no-sandbox',
+  '--disable-dev-shm-usage',
+  // GPU 프로세스를 아예 띄우지 않는다. 헤드리스라 쓰지도 않는데 프로세스 하나를 통째로 먹는다.
+  '--disable-gpu',
+  '--disable-software-rasterizer',
+  '--disable-accelerated-2d-canvas',
+  // 렌더러는 1개면 충분하다 — 우리는 페이지를 하나만 연다.
+  '--renderer-process-limit=1',
+  // 이미지는 수집에 전혀 쓰지 않는다. 디코딩 버퍼가 렌더러 메모리의 큰 몫이다.
+  // (JSON 은 fetch 로 받으므로 이미지를 꺼도 데이터가 달라지지 않는다)
+  '--blink-settings=imagesEnabled=false',
+  // 렌더러 V8 힙 상한. 실측 페이로드(프로그램 317건 ≈ 수백 KB)에 비해 넉넉하다.
+  // 폭주하는 렌더러가 컨테이너 전체를 끌고 죽는 것을 막는 안전판이다.
+  '--js-flags=--max-old-space-size=128',
+  // 잡일 제거 (Playwright 기본값에 없는 것만)
+  '--disable-sync',
+  '--mute-audio',
+];
+
+// 정리(close) 한 건당 상한. 이미 죽은 프로세스를 닫으려다 여기서 매달리면
+// 다음 수집이 막히므로 반드시 상한을 건다.
+const CLOSE_TIMEOUT_MS = 15000;
+// 앞선 수집이 브라우저를 놓기를 기다리는 상한. 스크래퍼 1회 상한보다 넉넉히 크게 잡아
+// 정상 수집을 억울하게 죽이지 않는다.
+const GATE_WAIT_MS = SCRAPE_TIMEOUT_MS + 15000;
+
+// ---- 살아 있는 브라우저 장부 ----------------------------------------------
+// 강제 종료(죽은 락 해제·워치독 재시작) 때 '기존 크로뮴을 확실히 죽이고 새로 띄우기'
+// 위해 필요하다. 이 장부가 없으면 새 사이클이 헌 크로뮴 위에 겹쳐 떠서 메모리가 두 배가 된다.
+const liveBrowsers = new Set();
+
+async function closeQuietly(label, what, obj) {
+  if (!obj) return;
+  try {
+    await withTimeout(Promise.resolve(obj.close()), CLOSE_TIMEOUT_MS, `${label} ${what}.close`);
+  } catch (e) {
+    // 이미 죽은 프로세스를 닫으려는 경우가 대부분이다. 다음 주기를 막을 이유가 없다.
+    console.warn(`[scraper] ${label} ${what}.close 실패(무시): ${e.message}`);
+  }
+}
+
+/**
+ * 지금 살아 있는 크로뮴을 전부 닫는다. 몇 개를 닫았는지 돌려준다.
+ * 스케줄러가 '죽은 락' 을 강제로 풀거나 워치독이 루프를 재시작할 때, 새 수집을 띄우기
+ * 전에 반드시 이걸 먼저 부른다. 매달린 page.evaluate 도 브라우저가 죽으면 함께 끝난다.
+ */
+async function closeAllBrowsers(reason) {
+  const list = Array.from(liveBrowsers);
+  if (list.length === 0) return 0;
+  console.warn(`[scraper] 살아 있는 브라우저 ${list.length}개를 강제로 닫습니다 (${reason})`);
+  await Promise.all(
+    list.map(async (b) => {
+      await closeQuietly('강제 정리', 'browser', b);
+      liveBrowsers.delete(b);
+    })
+  );
+  return list.length;
+}
+
+// ---- 브라우저 단일화 게이트 ------------------------------------------------
+// 크로뮴은 인스턴스끼리 메모리를 나눠 쓰지 않는다. 실측상 1개 ≈ 334MB, 2개 ≈ 654MB 로
+// 정직하게 두 배다. 그래서 "이 프로세스 안에서 크로뮴은 언제나 1개" 를 여기서 강제한다.
+//
+// 앞 순번이 끝나기를 기다리되 무한정 기다리지는 않는다. GATE_WAIT_MS 를 넘기면
+// 앞 순번을 강제로 죽이고 진행한다 — 기다리기만 하면 2026-08-18 의 '감시 정지' 가 재현된다.
+let gateTail = Promise.resolve();
+
+function acquireGate(label) {
+  const prev = gateTail;
+  let release;
+  const mine = new Promise((r) => {
+    release = r;
+  });
+  // 다음 대기자는 '내 차례가 끝난 뒤' 를 기다린다 → 대기자가 여럿이어도 한 줄로 선다.
+  gateTail = prev.then(() => mine, () => mine);
+
+  return (async () => {
+    let timer;
+    const timedOut = await Promise.race([
+      prev.then(() => false, () => false),
+      new Promise((r) => {
+        timer = setTimeout(() => r(true), GATE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (timedOut) {
+      console.error(
+        `[scraper] ${label}: 앞선 수집이 ${Math.round(GATE_WAIT_MS / 1000)}초째 브라우저를 놓지 않습니다 — ` +
+          '강제 종료하고 진행합니다'
+      );
+      await closeAllBrowsers(`${label} 대기 초과`);
+      // 브라우저가 죽으면 앞 순번은 곧 예외로 끝나며 게이트를 놓는다.
+      // 그래도 안 풀리는 경우까지 여기서 붙들리지 않도록 짧게만 더 기다린다.
+      await Promise.race([
+        prev.then(() => null, () => null),
+        new Promise((r) => setTimeout(r, 10000)),
+      ]);
+    }
+    return release;
+  })();
+}
+
 // 브라우저를 띄우고 → 일을 시키고 → 무슨 일이 있어도 닫는다.
 //
-// 이 함수가 지키는 것 두 가지:
-//  ① 전체 상한(SCRAPE_TIMEOUT_MS). 어느 단계가 매달려도 90초 안에 예외로 끝난다.
-//  ② 정리. 컨텍스트·브라우저를 finally 에서 닫는다. 타임아웃으로 빠져나갈 때도 여기를
-//     지나므로, 매달린 page.evaluate 는 브라우저가 닫히면서 함께 죽는다.
-//     닫기가 실패해도(이미 죽은 프로세스 등) 삼킨다 — 다음 주기를 막을 이유가 없다.
+// 이 함수가 지키는 것 네 가지:
+//  ① 단일화. 게이트를 통과한 하나만 크로뮴을 띄운다 (동시 2개 → 메모리 두 배 차단).
+//  ② 전체 상한(SCRAPE_TIMEOUT_MS). 어느 단계가 매달려도 90초 안에 예외로 끝난다.
+//  ③ 정리. page → context → browser 를 finally 에서 순서대로 닫는다. 앞엣것이 실패해도
+//     뒤엣것을 반드시 시도하고, 각각에 상한이 걸려 있어 정리 중에 매달리지 않는다.
+//     타임아웃으로 빠져나갈 때도 여기를 지나므로 매달린 page.evaluate 도 함께 죽는다.
+//  ④ 게이트 반납. launch 가 실패해도 finally 에서 반드시 놓는다 — 안 놓으면 이후 수집이
+//     전부 게이트에서 막힌다.
 //
 // 수집 1회마다 새로 띄우고 끝나면 완전히 종료한다. 브라우저를 재사용하면 세션·메모리가
 // 쌓이고, 한 번 이상해진 인스턴스가 이후 모든 주기를 오염시킨다.
 async function runInBrowser(label, fn) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    timeout: LAUNCH_TIMEOUT_MS,
-  });
+  const release = await acquireGate(label);
+  let browser;
   let context;
+  let page;
   try {
+    browser = await chromium.launch({
+      headless: true,
+      args: LAUNCH_ARGS,
+      timeout: LAUNCH_TIMEOUT_MS,
+    });
+    liveBrowsers.add(browser);
     context = await browser.newContext({
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       locale: 'ko-KR',
       viewport: { width: 1366, height: 900 },
     });
-    const page = await context.newPage();
+    page = await context.newPage();
     return await withTimeout(fn(page), SCRAPE_TIMEOUT_MS, `스크래퍼(${label})`);
   } finally {
-    try {
-      if (context) await context.close();
-    } catch (e) {
-      console.warn(`[scraper] ${label} context.close 실패(무시):`, e.message);
+    await closeQuietly(label, 'page', page);
+    await closeQuietly(label, 'context', context);
+    if (browser) {
+      liveBrowsers.delete(browser);
+      await closeQuietly(label, 'browser', browser);
     }
-    try {
-      await browser.close();
-    } catch (e) {
-      console.warn(`[scraper] ${label} browser.close 실패(무시):`, e.message);
-    }
+    release();
   }
 }
 
@@ -351,6 +470,7 @@ async function fetchDetails(programIds) {
 module.exports = {
   scrape,
   fetchDetails,
+  closeAllBrowsers,
   withTimeout,
   mapDetail,
   seasonYear,
