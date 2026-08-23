@@ -166,27 +166,35 @@ function acquireGate(label) {
   // 다음 대기자는 '내 차례가 끝난 뒤' 를 기다린다 → 대기자가 여럿이어도 한 줄로 선다.
   gateTail = prev.then(() => mine, () => mine);
 
+  // 이 함수는 절대로 거절(reject)되면 안 된다.
+  // 거절되면 호출자가 release 를 받지 못한 채 빠져나가는데, gateTail 은 이미 mine 을
+  // 기다리도록 바뀐 뒤라 그 mine 이 영영 안 풀린다 → 이후 모든 수집이 게이트에서 막힌다.
+  // 그래서 본문 전체를 감싸고, 무슨 일이 있어도 release 를 돌려준다.
   return (async () => {
-    let timer;
-    const timedOut = await Promise.race([
-      prev.then(() => false, () => false),
-      new Promise((r) => {
-        timer = setTimeout(() => r(true), GATE_WAIT_MS);
-      }),
-    ]);
-    clearTimeout(timer);
-    if (timedOut) {
-      console.error(
-        `[scraper] ${label}: 앞선 수집이 ${Math.round(GATE_WAIT_MS / 1000)}초째 브라우저를 놓지 않습니다 — ` +
-          '강제 종료하고 진행합니다'
-      );
-      await closeAllBrowsers(`${label} 대기 초과`);
-      // 브라우저가 죽으면 앞 순번은 곧 예외로 끝나며 게이트를 놓는다.
-      // 그래도 안 풀리는 경우까지 여기서 붙들리지 않도록 짧게만 더 기다린다.
-      await Promise.race([
-        prev.then(() => null, () => null),
-        new Promise((r) => setTimeout(r, 10000)),
+    try {
+      let timer;
+      const timedOut = await Promise.race([
+        prev.then(() => false, () => false),
+        new Promise((r) => {
+          timer = setTimeout(() => r(true), GATE_WAIT_MS);
+        }),
       ]);
+      clearTimeout(timer);
+      if (timedOut) {
+        console.error(
+          `[scraper] ${label}: 앞선 수집이 ${Math.round(GATE_WAIT_MS / 1000)}초째 브라우저를 놓지 않습니다 — ` +
+            '강제 종료하고 진행합니다'
+        );
+        await closeAllBrowsers(`${label} 대기 초과`);
+        // 브라우저가 죽으면 앞 순번은 곧 예외로 끝나며 게이트를 놓는다.
+        // 그래도 안 풀리는 경우까지 여기서 붙들리지 않도록 짧게만 더 기다린다.
+        await Promise.race([
+          prev.then(() => null, () => null),
+          new Promise((r) => setTimeout(r, 10000)),
+        ]);
+      }
+    } catch (e) {
+      console.error(`[scraper] ${label}: 게이트 대기 중 예외(무시하고 진행): ${e.message}`);
     }
     return release;
   })();
@@ -471,6 +479,9 @@ module.exports = {
   scrape,
   fetchDetails,
   closeAllBrowsers,
+  // 브라우저 수명주기(단일화 게이트·강제 종료·정리)를 사이트 없이 검증하기 위해 노출한다.
+  // 수집 로직에서 이걸 직접 부를 일은 없다 — scrape/fetchDetails 를 쓴다.
+  runInBrowser,
   withTimeout,
   mapDetail,
   seasonYear,
