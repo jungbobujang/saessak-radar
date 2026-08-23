@@ -48,7 +48,7 @@ const {
   notifyPayload,
   isTelegramConfigured,
 } = require('./watcher');
-const { withTimeout } = require('./scraper');
+const { withTimeout, closeAllBrowsers } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -311,6 +311,15 @@ async function runCollectCycle(reason) {
         `죽은 락으로 보고 강제 해제 후 재실행 (누적 ${staleUnlocks}회)`
     );
     beat({ staleUnlocks });
+    // 락만 풀고 바로 새 수집을 띄우면 헌 크로뮴이 아직 살아 있는 채로 새 크로뮴이
+    // 겹쳐 떠서 메모리가 두 배가 된다(실측 334MB → 654MB). 죽은 사이클이라고
+    // 판정한 이상 그 크로뮴도 죽은 것으로 취급하고 확실히 닫은 뒤에 진행한다.
+    try {
+      const killed = await closeAllBrowsers('죽은 락 강제 해제');
+      if (killed) console.error(`[scheduler] 남아 있던 크로뮴 ${killed}개를 닫고 재실행합니다`);
+    } catch (e) {
+      console.error('[scheduler] 헌 브라우저 정리 실패(무시하고 진행):', e.message);
+    }
     isCollecting = false;
   }
   isCollecting = true;
@@ -431,9 +440,18 @@ function watchdogTick() {
   }
 
   scheduleNext();
-  runCollectCycle('watchdog').catch((e) =>
-    console.error('[watchdog] 재시작 수집 예외:', e.message)
-  );
+  // 죽은 락 해제와 같은 이유로, 재시작 수집을 띄우기 전에 남아 있는 크로뮴을 먼저 닫는다.
+  // 워치독이 도는 상황은 정의상 '뭔가 매달려 있다' 이므로 헌 크로뮴이 살아 있을 확률이 높고,
+  // 그 위에 새 크로뮴을 겹쳐 띄우면 메모리가 두 배가 된다.
+  (async () => {
+    try {
+      const killed = await closeAllBrowsers('워치독 재시작');
+      if (killed) console.error(`[watchdog] 남아 있던 크로뮴 ${killed}개를 닫고 재시작합니다`);
+    } catch (e) {
+      console.error('[watchdog] 헌 브라우저 정리 실패(무시하고 진행):', e.message);
+    }
+    await runCollectCycle('watchdog');
+  })().catch((e) => console.error('[watchdog] 재시작 수집 예외:', e.message));
 }
 
 // ---- Railway 절전 대비 자체 keep-alive ----
