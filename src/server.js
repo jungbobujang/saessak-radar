@@ -290,11 +290,20 @@ async function runCollectCycle(reason) {
     isCollecting = false;
     collectStartedMs = 0;
 
+    // 연속 실패가 임계값에 닿으면 이 프로세스로는 더 해 볼 게 없다 — 스스로 나간다(⑧).
+    // 성공한 사이클은 failStreak 가 0 이라 여기 걸리지 않는다.
+    if ((heartbeat.failStreak || 0) >= FAIL_RESTART_STREAK) {
+      failStreakRestart().catch((e) =>
+        console.error('[maintenance] 재기동 처리 예외:', e.message)
+      );
+    }
+
     // 도는 동안 눌린 '즉시 확인' 이 있으면 여기서 이어서 한 번 돈다.
     // 플래그를 먼저 내리는 이유: 이어지는 수집 중에 또 누르면 그때 다시 켜져야 한다.
     // 이 재실행 자체는 reason='manual' 이라, 만에 하나 또 겹치면 다시 예약될 뿐이다.
     // await 하지 않는다 — 지금 이 함수는 앞선 요청의 응답을 붙들고 있는 중일 수 있다.
-    if (pendingManualCheck) {
+    // 재기동 절차가 시작됐으면 새 수집을 띄우지 않는다 — 곧 나갈 프로세스다.
+    if (pendingManualCheck && !restarting) {
       pendingManualCheck = false;
       console.log('[scheduler] 예약된 수동 확인을 이어서 실행합니다');
       setImmediate(() => {
@@ -377,6 +386,162 @@ function watchdogTick() {
   runCollectCycle('watchdog').catch((e) =>
     console.error('[watchdog] 재시작 수집 예외:', e.message)
   );
+}
+
+// ---- 프로세스 자체 재기동 (예방 정비 · 연속 실패 · 반복 재기동 경보) ----
+//
+// 위 여섯 겹은 전부 "프로세스는 멀쩡하다" 를 전제로 루프만 되살린다. 정작 2026-08-23
+// 사고는 그 전제가 깨진 쪽이었다 — 메모리가 누적되고 좀비 크로뮴이 남아 프로세스
+// 자체가 회복 불능이 됐다. 워치독은 로그만 쌓았고, 수집은 39회 연속 실패했는데
+// 사람은 그동안 아무것도 몰랐다. 프로세스 안에서 못 고치는 상태는 프로세스를 버려야 한다.
+//   ⑦ 예방 재기동   — 매일 새벽 4시(KST) 스스로 나간다. 누적 메모리·좀비가 비워진다.
+//   ⑧ 연속 실패 재기동 — failStreak 가 임계값에 닿으면 나가면서 텔레그램으로 알린다.
+//   ⑨ 반복 재기동 경보 — 하루 기동 횟수가 3회를 넘으면 "수동 확인 필요" 경보.
+//
+// ⚠ 종료 코드는 0 이 아니다. Railway 의 기본 재시작 정책이 ON_FAILURE 라서
+//    exit(0) 은 "정상 종료" 로 보고 컨테이너를 다시 띄우지 않는다 — 감시가 통째로 죽는다.
+//    다시 뜨게 하려면 0 이 아닌 코드로 나가야 한다. 정책을 ALWAYS 로 바꿨다면
+//    RESTART_EXIT_CODE=0 으로 되돌려도 된다.
+const envInt = (name, def) => {
+  const v = parseInt(process.env[name], 10);
+  return Number.isFinite(v) ? v : def;
+};
+const RESTART_EXIT_CODE = envInt('RESTART_EXIT_CODE', 1);
+const MAINTENANCE_HOUR = envInt('MAINTENANCE_HOUR', 4);       // KST 기준 정비 시각(0=끄지 않음, -1 이면 비활성)
+const MAINTENANCE_WINDOW_MIN = envInt('MAINTENANCE_WINDOW_MIN', 20); // 정비 창(수집 중이면 이 안에서 미룬다)
+const MAINTENANCE_MIN_UPTIME_MS = envMin('MAINTENANCE_MIN_UPTIME_MIN', 60); // 갓 뜬 프로세스는 비울 게 없다
+const FAIL_RESTART_STREAK = envInt('FAIL_RESTART_STREAK', 5); // 이만큼 연속 실패하면 재기동
+const RESTART_ALERT_PER_DAY = envInt('RESTART_ALERT_PER_DAY', 3); // 하루 기동이 이 수를 넘으면 경보
+
+const EXIT_LABEL = {
+  maintenance: '예방 재기동(정비)',
+  failstreak: '수집 연속 실패 자동 재기동',
+};
+
+let restarting = false; // 종료 절차 진입 여부 — 두 경로가 동시에 나가지 않게
+
+// KST 연·월·일·시·분을 한 번에 (watcher 의 kstYmd/kstHour 과 같은 잣대)
+function kstParts(ms) {
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const g = (t) => (p.find((x) => x.type === t) || {}).value || '';
+  return {
+    ymd: `${g('year')}-${g('month')}-${g('day')}`,
+    hour: parseInt(g('hour'), 10) % 24, // 자정을 24 로 주는 구현 대비
+    minute: parseInt(g('minute'), 10) || 0,
+  };
+}
+
+// 실제로 나가는 곳. 사유를 파일에 먼저 남긴다 — 다음 부팅이 "스스로 나갔는지
+// 밖에서 죽었는지(=OOM·크래시)" 를 이 값으로 가른다.
+function exitForRestart(reason) {
+  beat({ pendingExitReason: reason, pendingExitAt: new Date().toISOString() });
+  if (nextTimer) clearTimeout(nextTimer);
+  console.log(
+    `[maintenance] 프로세스 종료 (사유=${reason} · 코드=${RESTART_EXIT_CODE}) — 호스트가 다시 띄웁니다`
+  );
+  // stdout 이 파이프면 쓰기가 비동기다. 바로 exit 하면 위 줄이 잘려 사후 추적이 안 된다.
+  setTimeout(() => process.exit(RESTART_EXIT_CODE), 400);
+}
+
+// ⑦ 예방 재기동 — 매 분 점검, 조건이 맞는 첫 분에 나간다.
+function maintenanceTick() {
+  if (restarting || MAINTENANCE_HOUR < 0) return;
+  const now = Date.now();
+  const { ymd, hour, minute } = kstParts(now);
+  if (hour !== MAINTENANCE_HOUR || minute >= MAINTENANCE_WINDOW_MIN) return;
+  if (heartbeat.maintDate === ymd) return; // 오늘 몫은 끝났다(실행했든 건너뛰었든)
+
+  // 방금 뜬 프로세스는 비울 누적이 없다. 새벽 배포가 정비 창에 걸려도 헛되이 나가지 않는다.
+  // 파일 기록이 실패해도 이 조건이 재기동 루프를 막는 최후의 빗장이다.
+  if (now - bootMs < MAINTENANCE_MIN_UPTIME_MS) {
+    beat({ maintDate: ymd });
+    console.log(
+      `[maintenance] 예방 재기동 건너뜀 — 기동한 지 ${Math.round((now - bootMs) / 60000)}분밖에 안 됐습니다`
+    );
+    return;
+  }
+  // 수집 중이면 미룬다. 정비 창 안에서 매 분 다시 본다(창이 닫히면 오늘은 그냥 건너뛴다).
+  if (isCollecting) {
+    console.log('[maintenance] 수집 진행 중 — 예방 재기동을 다음 분으로 미룹니다');
+    return;
+  }
+
+  restarting = true;
+  const upHours = Math.round(((now - bootMs) / 3600000) * 10) / 10;
+  console.log(
+    `[maintenance] 예방 재기동 — 매일 ${MAINTENANCE_HOUR}시(KST) 정비 ` +
+      `(연속 가동 ${upHours}시간 · rss ${Math.round(process.memoryUsage().rss / 1048576)}MB)`
+  );
+  beat({ maintDate: ymd, maintRestarts: (heartbeat.maintRestarts || 0) + 1 });
+  exitForRestart('maintenance');
+}
+
+// ⑧ 연속 실패 재기동 — 로그만 쌓지 않고 스스로 나간다 + 사람에게 알린다.
+async function failStreakRestart() {
+  if (restarting) return;
+  restarting = true;
+  const streak = heartbeat.failStreak || 0;
+  const err = heartbeat.lastError || '알 수 없음';
+  console.error(`[maintenance] 수집 ${streak}회 연속 실패 — 스스로 재기동합니다`);
+
+  // failStreak 를 0 으로 되돌려 저장한다. 그대로 두면 부팅 → 첫 실패 → 임계값 즉시 도달
+  // → 재기동의 무한 루프가 된다. 실패가 계속되면 다시 5회를 채워 한 번 더 나가고,
+  // 그래도 안 되면 ⑨ 반복 재기동 경보가 사람을 부른다.
+  beat({
+    failStreak: 0,
+    failRestarts: (heartbeat.failRestarts || 0) + 1,
+    lastFailRestartAt: new Date().toISOString(),
+  });
+
+  await sendTelegram(
+    '⚠️ <b>수집 연속 실패, 자동 재기동함</b>\n' +
+      `연속 ${streak}회 실패해 프로세스를 스스로 재시작합니다.\n` +
+      `마지막 오류: ${escapeHtml(err)}`
+  ).catch(() => {});
+
+  exitForRestart('failstreak');
+}
+
+// ⑨ 부팅 기록 + 반복 재기동 경보.
+// 부팅 1회 = 재기동 1회로 센다. 예방 재기동뿐 아니라 크래시(OOM)·재배포로 다시 뜬 것까지
+// 전부 잡힌다 — 이번 사고의 사각지대가 바로 "죽었다 다시 떠도 아무도 모른다" 였다.
+// 예방 재기동이 하루 1회를 쓰므로, 기본 임계값 3 은 사실상 "예상 밖 재기동 2회" 다.
+function noteBoot() {
+  const nowIso = new Date().toISOString();
+  const { ymd } = kstParts(Date.now());
+  const count = (heartbeat.bootDate === ymd ? heartbeat.bootCount || 0 : 0) + 1;
+  const prevReason = heartbeat.pendingExitReason || null; // 스스로 나간 게 아니면 비어 있다
+  const label = EXIT_LABEL[prevReason] || '외부 요인(재배포·크래시·호스트 재시작)';
+
+  beat({
+    bootDate: ymd,
+    bootCount: count,
+    lastBootAt: nowIso,
+    lastExitReason: prevReason,
+    pendingExitReason: null,
+    pendingExitAt: null,
+  });
+  console.log(`[maintenance] 오늘(KST) ${count}번째 기동 — 직전 종료: ${label}`);
+
+  // 무한 재시작 루프를 텔레그램으로 도배하지 않으려고, 넘긴 첫 회와 그 뒤 5회마다만 보낸다.
+  // (기본값이면 4·9·14… 번째 기동에서 울린다)
+  const over = count - RESTART_ALERT_PER_DAY;
+  if (over > 0 && (over === 1 || over % 5 === 0)) {
+    sendTelegram(
+      '🚨 <b>반복 재기동 — 수동 확인 필요</b>\n' +
+        `오늘(KST) ${count}번째 기동입니다. 직전 종료: ${escapeHtml(label)}\n` +
+        (heartbeat.lastError ? `마지막 오류: ${escapeHtml(heartbeat.lastError)}\n` : '') +
+        '자동 복구가 반복되고 있습니다 — Railway 로그를 확인하세요.'
+    ).catch(() => {});
+  }
 }
 
 // ---- Railway 절전 대비 자체 keep-alive ----
@@ -2864,6 +3029,10 @@ app.get('/api/summary', (req, res) => {
         watchdogRestarts: heartbeat.restarts || 0,
         failStreak: heartbeat.failStreak || 0,
         staleUnlocks: heartbeat.staleUnlocks || 0,
+        // 프로세스 재기동 추적 — bootsToday 가 계속 늘면 밖에서 죽고 있다는 뜻이다.
+        bootsToday: heartbeat.bootCount || 0,
+        lastBootAt: heartbeat.lastBootAt || null,
+        lastExitReason: heartbeat.lastExitReason || null,
         intervalMinutes: currentInterval || s.intervalMinutes,
         matchedCount: runtime.lastMatchCount,
       },
@@ -2900,6 +3069,8 @@ app.get('/health/watch', (req, res) => {
     watchdogRestarts: heartbeat.restarts || 0,
     failStreak: heartbeat.failStreak || 0,
     staleUnlocks: heartbeat.staleUnlocks || 0,
+    bootsToday: heartbeat.bootCount || 0,
+    lastExitReason: heartbeat.lastExitReason || null,
     lastError: heartbeat.lastError || null,
   });
 });
@@ -4410,6 +4581,9 @@ app.listen(PORT, () => {
     );
   }
 
+  // 기동 횟수 집계 + 직전 종료 사유 판정 (하트비트를 읽은 "다음"이어야 한다)
+  noteBoot();
+
   // 정기 수집 스케줄 시작(설정 간격 기준). 이후 매 주기는 '끝난 뒤' 스스로 재예약.
   scheduleNext();
 
@@ -4430,6 +4604,21 @@ app.listen(PORT, () => {
   console.log(
     `[server] 워치독 등록 (${WATCHDOG_TICK_MS / 60000}분 간격 점검 · ` +
       `${WATCHDOG_STALL_MS / 60000}분 정지 시 재시작)`
+  );
+
+  // 예방 재기동: 매 분 점검 → 정비 시각(KST)에 스스로 나간다.
+  setInterval(() => {
+    try {
+      maintenanceTick();
+    } catch (e) {
+      console.error('[maintenance] 점검 예외(무시):', e.message);
+    }
+  }, 60000);
+  console.log(
+    MAINTENANCE_HOUR < 0
+      ? '[server] 예방 재기동 비활성 (MAINTENANCE_HOUR=-1)'
+      : `[server] 예방 재기동 등록 (매일 ${MAINTENANCE_HOUR}시 KST · 창 ${MAINTENANCE_WINDOW_MIN}분 · ` +
+          `연속 실패 ${FAIL_RESTART_STREAK}회 시 즉시 재기동 · 하루 ${RESTART_ALERT_PER_DAY}회 초과 시 경보)`
   );
 
   // Railway 절전 대비 자체 핑 (공개 URL 을 알 때만)
