@@ -230,7 +230,34 @@ const WATCHDOG_STALL_MS = envMin('WATCHDOG_STALL_MIN', 30);  // 이만큼 활동
 // 사이클 상한보다 반드시 커야 한다 — 설정을 잘못 줘도 아래 보정으로 지켜진다.
 const STALE_LOCK_MS = Math.max(envMin('STALE_LOCK_MIN', 5), CYCLE_TIMEOUT_MS + 60000);
 
+// ---- 연속 실패 시 재시도 간격 늘리기 (백오프) ----
+// 실패가 이어지는 동안 같은 간격으로 계속 크로뮴을 띄우면, 그 재시도 자체가 메모리 압박이 된다.
+// (3분 간격으로 20연속 실패 = 한 시간 동안 크로뮴을 20번 기동한 것이다. 컨테이너가
+//  메모리로 죽는 중이라면 재시도가 죽음을 재촉한다.)
+// 그래서 실패가 BACKOFF_AFTER 회를 넘기면 다음 시도까지의 간격을 2배씩 늘린다.
+// 한 번이라도 성공하면 failStreak 가 0 이 되어 백오프도 즉시 사라진다.
+const BACKOFF_AFTER = Math.max(1, parseInt(process.env.BACKOFF_AFTER_FAILS, 10) || 5);
+const BACKOFF_MAX_MIN = Math.max(1, parseFloat(process.env.BACKOFF_MAX_MIN) || 60);
+
+// 연속 실패 횟수 → 간격 배수. BACKOFF_AFTER 이하면 1배(백오프 없음).
+// 지수는 10 으로 잘라 둔다 — 실제 상한은 BACKOFF_MAX_MIN 이 잡지만, 중간 계산이
+// Infinity 로 가면 setTimeout 이 즉시 발화해 오히려 폭주한다.
+function backoffFactor() {
+  const streak = heartbeat.failStreak || 0;
+  if (streak <= BACKOFF_AFTER) return 1;
+  return Math.pow(2, Math.min(streak - BACKOFF_AFTER, 10));
+}
+
+// 실제로 쓸 다음 주기(분). 백오프는 간격을 '늘리기만' 한다 —
+// 사용자가 설정한 간격이 이미 상한보다 길면 그 간격을 그대로 존중한다.
+function nextDelayMinutes(baseMin) {
+  const f = backoffFactor();
+  if (f === 1) return baseMin;
+  return Math.max(baseMin, Math.min(baseMin * f, BACKOFF_MAX_MIN));
+}
+
 let currentInterval = null;  // 대시보드/요약 노출용(현재 적용 간격)
+let currentDelayMinutes = null; // 백오프까지 반영해 '실제로 예약한' 지연(분)
 let isCollecting = false;    // 단일 실행 락 — 수집(scrape+fetchDetails) 1건만 진행
 let collectStartedMs = 0;    // 그 락을 언제 잡았는지 (죽은 락 판정용)
 let staleUnlocks = 0;        // 죽은 락을 강제로 푼 누적 횟수
@@ -383,6 +410,8 @@ function scheduleNext() {
   } catch (e) {
     console.error(`[scheduler] 설정 읽기 실패 — 기본 ${m}분으로 예약:`, e.message);
   }
+  const delay = nextDelayMinutes(m);
+  currentDelayMinutes = delay;
   if (nextTimer) clearTimeout(nextTimer);
   nextTimer = setTimeout(async () => {
     try {
@@ -393,8 +422,15 @@ function scheduleNext() {
     } finally {
       scheduleNext(); // 무슨 일이 있어도 다음 주기는 예약한다
     }
-  }, m * 60000);
-  console.log(`[scheduler] 다음 정기 수집 예약: ${m}분 후`);
+  }, delay * 60000);
+  if (delay !== m) {
+    console.warn(
+      `[scheduler] 다음 정기 수집 예약: ${delay}분 후 ` +
+        `(연속 실패 ${heartbeat.failStreak}회 → 설정 ${m}분에서 ${backoffFactor()}배 백오프, 상한 ${BACKOFF_MAX_MIN}분)`
+    );
+  } else {
+    console.log(`[scheduler] 다음 정기 수집 예약: ${delay}분 후`);
+  }
 }
 
 // ---- 워치독 ----
@@ -405,7 +441,9 @@ function scheduleNext() {
 // 매 점검마다 오발동해 수집을 계속 덧돌린다. 간격의 3배와 30분 중 큰 값을 쓴다.
 // (상태바·/health/watch 도 같은 잣대를 써야 화면과 워치독이 어긋나지 않는다)
 function stallThresholdMs() {
-  const interval = currentInterval || 10;
+  // 백오프로 늘어난 대기까지 봐야 한다. 설정 간격만 보면, 연속 실패로 40분 뒤를
+  // 예약해 둔 상태를 워치독이 '정지' 로 오인해 강제 수집을 걸고 — 백오프가 무력화된다.
+  const interval = currentDelayMinutes || currentInterval || 10;
   return Math.max(WATCHDOG_STALL_MS, interval * 3 * 60000);
 }
 
@@ -3045,6 +3083,10 @@ app.get('/health/watch', (req, res) => {
     watchdogRestarts: heartbeat.restarts || 0,
     failStreak: heartbeat.failStreak || 0,
     staleUnlocks: heartbeat.staleUnlocks || 0,
+    // 백오프 상태. '왜 설정한 간격보다 늦게 도는지' 를 밖에서 바로 알 수 있어야 한다.
+    intervalMinutes: currentInterval || null,
+    nextDelayMinutes: currentDelayMinutes || null,
+    backoffFactor: backoffFactor(),
     lastError: heartbeat.lastError || null,
   });
 });
