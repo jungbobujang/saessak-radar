@@ -77,18 +77,27 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
-// ---- 크로뮴 launch 인자 (메모리 감량) --------------------------------------
+// ---- 크로뮴 launch 인자 --------------------------------------------------
 // 헤드리스 수집에만 쓰는 브라우저다. 화면에 그릴 일도, 사람이 볼 일도 없다.
-// 아래 인자는 전부 '수집 결과(카드 배열)를 바꾸지 않는 것' 만 골랐다.
-// 데이터는 page.evaluate 안의 fetch(JSON) 로 받으므로 렌더링 계열을 꺼도 영향이 없다.
+// 그래서 '띄우지 않아도 되는 부속' 만 끈다. 여기 있는 것은 전부 페이지의 DOM·네트워크·
+// JS 실행에 관여하지 않는다 — 수집 결과가 달라질 여지가 없다.
 //
-// 주의 ① --single-process 는 쓰지 않는다. 메모리는 가장 많이 줄지만 크로뮴이 자주
-//        죽어 수집이 통째로 실패한다. 대신 --renderer-process-limit=1 로 렌더러만 묶는다.
-// 주의 ② --disable-features=... 를 직접 넘기지 않는다. Playwright 가 이미 자체 목록을
-//        넘기고 있고, 같은 스위치를 또 주면 뒤엣것이 앞엣것을 통째로 덮어써서
-//        Playwright 가 끈 기능들이 되살아난다(동작이 미묘하게 바뀐다).
-// 주의 ③ --disable-dev-shm-usage 는 Playwright 기본값에도 이미 들어 있다.
-//        의도를 남기기 위해 그대로 둔다(중복이라 부작용은 없다).
+// 일부러 쓰지 않는 것들. 메모리는 더 줄지만, 수집 결과나 실패 양상을 바꿀 수 있어서
+// 실사이트로 검증하기 전에는 배포에 태우지 않는다.
+//   · --single-process        : 감량폭이 가장 크지만 크로뮴이 자주 죽는다.
+//   · --renderer-process-limit=1 : 같은 프로세스 모델 조작 계열. 페이지 하나만 열므로
+//     실질 영향은 없어 보이지만, 사이트 구성이 바뀌면 얘기가 달라진다.
+//   · --blink-settings=imagesEnabled=false : 이미지 디코딩 메모리를 크게 줄인다.
+//     데이터는 페이지 안 fetch(JSON)로 받으니 이론상 무관하고 실제로 카드 317건이
+//     완전히 같게 나온 적도 있지만, 페이지가 무엇을 기다리는지를 바꾸는 옵션이다.
+//   · --js-flags=--max-old-space-size=... : 렌더러 V8 힙 상한. 페이로드가 커지면
+//     수집이 성공하던 자리에서 렌더러가 죽는 새 실패 경로가 생긴다.
+// 되살릴 때는 반드시 실사이트 수집 결과를 감량 전과 대조한 뒤에.
+//
+// 주의: --disable-features=... 를 직접 넘기지 않는다. Playwright 가 이미 자체 목록을
+//       넘기고 있고, 같은 스위치를 또 주면 뒤엣것이 앞엣것을 통째로 덮어써서
+//       Playwright 가 끈 기능들이 되살아난다.
+// 주의: --disable-dev-shm-usage 는 Playwright 기본값에도 이미 있다. 의도 표시로 남긴다.
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-dev-shm-usage',
@@ -96,15 +105,7 @@ const LAUNCH_ARGS = [
   '--disable-gpu',
   '--disable-software-rasterizer',
   '--disable-accelerated-2d-canvas',
-  // 렌더러는 1개면 충분하다 — 우리는 페이지를 하나만 연다.
-  '--renderer-process-limit=1',
-  // 이미지는 수집에 전혀 쓰지 않는다. 디코딩 버퍼가 렌더러 메모리의 큰 몫이다.
-  // (JSON 은 fetch 로 받으므로 이미지를 꺼도 데이터가 달라지지 않는다)
-  '--blink-settings=imagesEnabled=false',
-  // 렌더러 V8 힙 상한. 실측 페이로드(프로그램 317건 ≈ 수백 KB)에 비해 넉넉하다.
-  // 폭주하는 렌더러가 컨테이너 전체를 끌고 죽는 것을 막는 안전판이다.
-  '--js-flags=--max-old-space-size=128',
-  // 잡일 제거 (Playwright 기본값에 없는 것만)
+  // 켜 둘 이유가 없는 부속
   '--disable-sync',
   '--mute-audio',
 ];
