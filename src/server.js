@@ -277,6 +277,15 @@ const heartbeat = {
   restarts: 0,         // 워치독이 되살린 누적 횟수
   failStreak: 0,       // 연속 수집 실패 횟수 (성공하면 0)
   staleUnlocks: 0,     // 죽은 락을 강제로 푼 누적 횟수
+  // 프로세스 자가 재기동 기록. 재기동하면 메모리 변수는 다 날아가므로 파일에 남긴다 —
+  // '오늘 몇 번 다시 태어났는지' 는 죽은 다음에도 알아야 의미가 있는 값이다.
+  selfRestarts: 0,           // 자가 재기동 누적 (계획·비계획 모두)
+  selfRestartsToday: 0,      // 오늘(KST) 비계획 재기동 횟수 — 새벽 정기분은 세지 않는다
+  selfRestartDate: null,     // 위 '오늘' 이 어느 날짜인지 (KST YYYY-MM-DD)
+  failStreakAtLastRestart: 0,// 마지막 재기동 시점의 연속 실패 횟수 (중복 재기동 방지용)
+  lastSelfRestartAt: null,
+  lastSelfRestartReason: null,
+  lastDailyRestartDate: null,// 새벽 정기 재기동을 마친 날 (하루 1회 보장)
 };
 
 function loadHeartbeat() {
@@ -365,6 +374,10 @@ async function runCollectCycle(reason) {
       lastMs: Date.now() - startedMs,
       // 연속 실패 횟수 — 성공하면 0 으로 되돌린다. 상태바가 이 값을 보여 준다.
       failStreak: r && r.ok !== false ? 0 : (heartbeat.failStreak || 0) + 1,
+      // 자가 재기동 기준선도 같이 되돌린다. 한 번 성공했으면 그 전의 실패 이력은
+      // 더 이상 '이 프로세스가 이상하다' 는 증거가 아니다.
+      failStreakAtLastRestart:
+        r && r.ok !== false ? 0 : heartbeat.failStreakAtLastRestart || 0,
     });
     return r;
   } catch (e) {
@@ -383,11 +396,20 @@ async function runCollectCycle(reason) {
     isCollecting = false;
     collectStartedMs = 0;
 
+    // 락이 풀린 지금이 프로세스를 버릴 수 있는 유일하게 안전한 지점이다 —
+    // 도는 수집을 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
+    // (임계 미달이면 아무것도 하지 않는다. 사실상 대부분의 사이클이 그렇다.)
+    try {
+      maybeSelfRestartOnFailStreak();
+    } catch (e) {
+      console.error('[restart] 재기동 판정 예외(무시):', e.message);
+    }
+
     // 도는 동안 눌린 '즉시 확인' 이 있으면 여기서 이어서 한 번 돈다.
     // 플래그를 먼저 내리는 이유: 이어지는 수집 중에 또 누르면 그때 다시 켜져야 한다.
     // 이 재실행 자체는 reason='manual' 이라, 만에 하나 또 겹치면 다시 예약될 뿐이다.
     // await 하지 않는다 — 지금 이 함수는 앞선 요청의 응답을 붙들고 있는 중일 수 있다.
-    if (pendingManualCheck) {
+    if (pendingManualCheck && !restarting) {
       pendingManualCheck = false;
       console.log('[scheduler] 예약된 수동 확인을 이어서 실행합니다');
       setImmediate(() => {
@@ -490,6 +512,233 @@ function watchdogTick() {
     }
     await runCollectCycle('watchdog');
   })().catch((e) => console.error('[watchdog] 재시작 수집 예외:', e.message));
+}
+
+// ---- 프로세스 자가 재기동 (메모리 최후 방어) ----
+//
+// 워치독은 '루프' 만 되살린다. 프로세스는 그대로 두므로, 문제가 루프가 아니라
+// 프로세스 자체에 쌓인 것(메모리)일 때는 아무리 되살려도 같은 자리에서 다시 죽는다.
+// 이번 OOM 이 그 형태였다 — 크로뮴이 뜨고 지는 사이에 남은 것이 조금씩 누적되고,
+// 컨테이너가 한도에 닿는 순간 수집이 통째로 유실된다.
+//
+// 그래서 세 겹을 더 둔다. 앞의 둘은 손을 쓰는 장치고, 셋째는 손을 떼는 장치다.
+//   ① 새벽 정기 재기동    — 매일 04시에 한 번, 쌓인 것을 0 으로 되돌린다 (예방)
+//   ② 연속 실패 자가재기동 — 5회 연속 실패하면 이 프로세스를 버린다 (치료)
+//   ③ 하루 3회 초과 경보   — ②가 반복되면 재기동이 답이 아니라는 뜻이다 (포기·호출)
+//
+// 재기동 = process.exit(1). Railway 의 재시작 정책(ON_FAILURE)이 새 컨테이너를 띄운다.
+// 0 으로 나가면 '할 일을 마치고 정상 종료했다' 로 읽혀 다시 띄우지 않는 호스팅이 있어
+// 일부러 1 로 나간다. 상태는 전부 볼륨(DATA_DIR)에 있으므로 재기동해도 잃는 것은 없다.
+const DAILY_RESTART_HOUR = (() => {
+  const v = process.env.DAILY_RESTART_HOUR;
+  if (v === undefined || v === '') return 4;
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 4;
+  return n >= 0 && n <= 23 ? n : -1; // 범위 밖(예: -1)은 '끔'
+})();
+// 연속 실패 몇 회에 프로세스를 버릴지. 0 이면 끈다.
+// 백오프 시작점(BACKOFF_AFTER, 기본 5)과 같은 값을 기본으로 쓴다 — 물러설 만큼 물러섰는데도
+// 실패가 이어진다면 간격의 문제가 아니라 프로세스의 문제라는 뜻이다.
+// `|| 5` 로 적으면 0 을 줘도 5 로 되살아난다(0 은 falsy). '끈다'는 뜻으로 0 을 준 사람이
+// 정반대로 켜진 채 돌아가는 것이 가장 나쁜 결과라, 숫자인지를 따로 본다.
+const SELF_RESTART_AFTER_FAILS = (() => {
+  const v = parseInt(process.env.SELF_RESTART_AFTER_FAILS, 10);
+  return Math.max(0, Number.isFinite(v) ? v : 5);
+})();
+// 하루에 이 횟수를 넘겨 재기동해야 할 상황이 되면, 더 재기동하지 않고 사람을 부른다.
+const SELF_RESTART_MAX_PER_DAY = (() => {
+  const v = parseInt(process.env.SELF_RESTART_MAX_PER_DAY, 10);
+  return Math.max(1, Number.isFinite(v) ? v : 3);
+})();
+// 재기동 직후 또 재기동하는 것을 막는 최소 생존 시간. 하트비트 파일 쓰기가 실패해도
+// (볼륨이 안 붙은 경우 등) 04 시대에 재기동이 연쇄하지 않게 하는 안전핀이다.
+// 04 시 정각 근처의 창(10분) 안에서만 정기 재기동을 걸고, 그 창보다 최소 생존 시간을
+// 길게(15분) 잡는다. 두 값의 관계가 핵심이다 — 창이 최소 생존 시간보다 짧아야
+// 기록이 유실돼도 같은 시간대에 두 번 나갈 수 없다.
+// 기본값이 운영값이다. 아래 두 변수는 검증용이며 평소 건드리지 않는다.
+const DAILY_RESTART_WINDOW_MIN = Math.max(
+  1,
+  parseFloat(process.env.DAILY_RESTART_WINDOW_MIN) || 10
+);
+const MIN_UPTIME_FOR_DAILY_MS = (() => {
+  const v = parseFloat(process.env.DAILY_RESTART_MIN_UPTIME_MIN);
+  return (Number.isFinite(v) && v >= 0 ? v : 15) * 60000;
+})();
+// 연속 실패 재기동에도 같은 성격의 하한을 둔다.
+// 정기 재기동에는 위 안전핀이 있는데 이쪽에는 없었다. 볼륨이 안 붙어 하트비트를 못 남기는
+// 환경에서는 failStreak 도 selfRestartsToday 도 재기동과 함께 0 으로 돌아가므로,
+// '하루 3회' 상한이 영영 차지 않고 재기동만 계속된다(호스팅의 재시작 한도를 태운다).
+// 부팅 직후 창을 막아 두면 최악의 경우에도 재기동 사이에 이만큼 간격이 강제된다.
+const MIN_UPTIME_FOR_RESTART_MS = (() => {
+  const v = parseFloat(process.env.SELF_RESTART_MIN_UPTIME_MIN);
+  return (Number.isFinite(v) && v >= 0 ? v : 10) * 60000;
+})();
+
+let restarting = false;      // 재기동 절차에 두 번 들어오지 않게
+let stormAlertedDate = null; // 재기동 폭주 경보를 하루 한 번만 보내려고
+
+// KST 날짜/시/분. watcher 에도 같은 헬퍼가 있지만 그쪽은 감시 로직 전용이라 끌어오지 않는다
+// (프로세스를 죽이는 판단이 watcher 의 export 변화에 딸려 흔들리면 곤란하다).
+function kstParts(ms) {
+  const d = new Date(ms);
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const g = (t) => parseInt((parts.find((x) => x.type === t) || {}).value, 10) || 0;
+  return { ymd, hour: g('hour') % 24, minute: g('minute') };
+}
+
+// 오늘(KST) 비계획 재기동 횟수. 날짜가 바뀌었으면 0 부터 다시 센다.
+function selfRestartsToday(nowMs) {
+  const { ymd } = kstParts(nowMs);
+  return heartbeat.selfRestartDate === ymd ? heartbeat.selfRestartsToday || 0 : 0;
+}
+
+// 텔레그램은 '보내고 나서' 죽어야 의미가 있다 — 죽은 뒤에는 아무도 못 보낸다.
+// 다만 발송이 매달리면 재기동 자체가 막히므로 상한을 둔다. 못 보내도 재기동은 진행한다.
+async function notifyBeforeExit(html) {
+  try {
+    await withTimeout(sendTelegram(html), 10000, '재기동 알림');
+  } catch (e) {
+    console.error('[restart] 재기동 알림 발송 실패(무시하고 진행):', e.message);
+  }
+}
+
+// kind: 'daily' (계획) | 'failstreak' (비계획)
+async function selfRestart(kind, reasonText, telegramHtml) {
+  if (restarting) return;
+  restarting = true;
+  const nowMs = Date.now();
+  const { ymd } = kstParts(nowMs);
+  const planned = kind === 'daily';
+
+  const patch = {
+    selfRestarts: (heartbeat.selfRestarts || 0) + 1,
+    lastSelfRestartAt: new Date(nowMs).toISOString(),
+    lastSelfRestartReason: kind,
+  };
+  if (planned) {
+    patch.lastDailyRestartDate = ymd;
+  } else {
+    // 계획 재기동은 매일 정확히 1회로 정해져 있다. 그것까지 세면 '하루 3회' 경보가
+    // 한 칸씩 앞당겨져 무뎌지므로, 예정에 없던 재기동만 센다.
+    patch.selfRestartDate = ymd;
+    patch.selfRestartsToday = selfRestartsToday(nowMs) + 1;
+    // 재기동해도 failStreak 는 파일에 남는다. 이 값을 같이 남겨 두지 않으면 부활 직후
+    // 실패 1회에 곧바로 임계를 다시 넘겨 무한 재기동이 된다.
+    patch.failStreakAtLastRestart = heartbeat.failStreak || 0;
+  }
+  beat(patch); // 죽기 전에 파일에 먼저 남긴다 — 죽고 나서는 남길 수 없다
+
+  console.error(`[restart] ${reasonText} — 프로세스를 재기동합니다 (exit 1)`);
+  if (telegramHtml) await notifyBeforeExit(telegramHtml);
+
+  // 나가기 전에 크로뮴을 닫는다. 컨테이너가 통째로 사라지는 환경이면 어차피 같이 죽지만,
+  // 로컬처럼 프로세스만 죽는 실행에서는 고아로 남아 메모리를 계속 붙들고 있다.
+  try {
+    const killed = await closeAllBrowsers('프로세스 재기동');
+    if (killed) console.error(`[restart] 남아 있던 크로뮴 ${killed}개를 닫았습니다`);
+  } catch (e) {
+    console.error('[restart] 브라우저 정리 실패(무시하고 진행):', e.message);
+  }
+
+  // 로그가 stdout 으로 빠져나갈 틈을 주고 나간다 (Railway 로그에 사유가 남아야 한다).
+  setTimeout(() => process.exit(1), 300).unref();
+}
+
+// ---- ② 연속 실패 자가 재기동 · ③ 하루 3회 초과 경보 ----
+// 수집 락이 풀린 뒤에만 부른다 — 도는 수집을 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
+function maybeSelfRestartOnFailStreak() {
+  if (!SELF_RESTART_AFTER_FAILS || restarting) return;
+  // 갓 태어난 프로세스는 버리지 않는다 (위 MIN_UPTIME_FOR_RESTART_MS 주석 참고).
+  const upMs = Date.now() - bootMs;
+  if (upMs < MIN_UPTIME_FOR_RESTART_MS) {
+    console.warn(
+      `[restart] 연속 실패 ${heartbeat.failStreak || 0}회지만 기동한 지 ` +
+        `${Math.round(upMs / 60000)}분뿐입니다 — 이번에는 재기동하지 않습니다 ` +
+        `(최소 ${Math.round(MIN_UPTIME_FOR_RESTART_MS / 60000)}분)`
+    );
+    return;
+  }
+  const streak = heartbeat.failStreak || 0;
+  // 마지막 재기동 이후로 다시 임계만큼 쌓였을 때만. failStreak 는 재기동해도 파일에
+  // 남아 있으므로, 이 뺄셈이 없으면 부활 직후 실패 1회에 또 나가는 재기동 루프가 된다.
+  const since = streak - (heartbeat.failStreakAtLastRestart || 0);
+  if (streak < SELF_RESTART_AFTER_FAILS || since < SELF_RESTART_AFTER_FAILS) return;
+
+  const nowMs = Date.now();
+  const done = selfRestartsToday(nowMs);
+  const lastError = heartbeat.lastError || '알 수 없음';
+
+  if (done >= SELF_RESTART_MAX_PER_DAY) {
+    // 오늘 이미 상한만큼 다시 태어났는데 또 실패한다 = 재기동으로는 안 고쳐지는 문제다.
+    // 여기서 또 나가면 호스팅의 재시작 한도만 태우고 원인은 그대로 남는다. 사람을 부른다.
+    const { ymd } = kstParts(nowMs);
+    if (stormAlertedDate !== ymd) {
+      stormAlertedDate = ymd;
+      console.error(
+        `[restart] 오늘 자가 재기동 ${done}회 — 상한(${SELF_RESTART_MAX_PER_DAY}회) 초과라 ` +
+          '더 재기동하지 않고 경보만 보냅니다'
+      );
+      sendTelegram(
+        '🚨 <b>새싹 레이더 재기동 반복</b>\n' +
+          `오늘 자가 재기동이 <b>${done}회</b>(상한 ${SELF_RESTART_MAX_PER_DAY}회)인데 ` +
+          `또 ${streak}회 연속 실패했습니다.\n` +
+          '재기동으로 고쳐지지 않는 문제라, 더 다시 시작하지 않고 멈춰 서 있습니다.\n' +
+          `마지막 오류: ${escapeHtml(lastError)}\n` +
+          '직접 확인이 필요합니다.'
+      ).catch(() => {});
+    }
+    return;
+  }
+
+  selfRestart(
+    'failstreak',
+    `수집이 ${streak}회 연속 실패했습니다 (오늘 ${done + 1}번째 재기동)`,
+    '♻️ <b>새싹 레이더 자가 재기동</b>\n' +
+      `수집이 <b>${streak}회 연속</b> 실패해 프로세스를 다시 시작합니다.\n` +
+      `마지막 오류: ${escapeHtml(lastError)}\n` +
+      `오늘 ${done + 1}번째 재기동입니다 (상한 ${SELF_RESTART_MAX_PER_DAY}회).`
+  ).catch((e) => console.error('[restart] 재기동 절차 예외:', e.message));
+}
+
+// ---- ① 새벽 정기 재기동 ----
+// 워치독과 같은 1분 틱에 얹는다. 04 시대의 앞 10분 안에서, 아직 오늘 몫을 안 했고,
+// 수집이 돌고 있지 않을 때 한 번 나간다.
+let dailyDeferLoggedAt = 0;
+function dailyRestartTick() {
+  if (DAILY_RESTART_HOUR < 0 || restarting) return;
+  const nowMs = Date.now();
+  const { ymd, hour, minute } = kstParts(nowMs);
+  if (heartbeat.lastDailyRestartDate === ymd) return; // 오늘 몫은 이미 했다
+  if (hour !== DAILY_RESTART_HOUR || minute >= DAILY_RESTART_WINDOW_MIN) return;
+  // 방금 재기동한 프로세스를 또 재기동할 이유는 없다. 창(10분)보다 길게 잡아 두면
+  // 기록이 유실돼도 같은 시간대에 두 번 나갈 수 없다.
+  if (nowMs - bootMs < MIN_UPTIME_FOR_DAILY_MS) return;
+  if (isCollecting) {
+    // 도는 수집을 끊지 않는다. 1분 뒤 이 점검이 다시 오고, 창이 닫히면 오늘은 건너뛴다.
+    if (nowMs - dailyDeferLoggedAt > 60000) {
+      dailyDeferLoggedAt = nowMs;
+      console.log('[restart] 정기 재기동 시각이지만 수집 중 — 다음 분에 다시 본다');
+    }
+    return;
+  }
+  // 정기 재기동은 텔레그램을 보내지 않는다. 매일 새벽 4시에 울리는 알림은 정보가
+  // 아니라 소음이고, 기록은 heartbeat.json 과 로그에 남는다.
+  selfRestart(
+    'daily',
+    `새벽 정기 재기동 (매일 ${DAILY_RESTART_HOUR}시 · 쌓인 메모리를 되돌린다)`,
+    null
+  ).catch((e) => console.error('[restart] 정기 재기동 예외:', e.message));
 }
 
 // ---- Railway 절전 대비 자체 keep-alive ----
@@ -3047,6 +3296,9 @@ app.get('/api/summary', (req, res) => {
         watchdogRestarts: heartbeat.restarts || 0,
         failStreak: heartbeat.failStreak || 0,
         staleUnlocks: heartbeat.staleUnlocks || 0,
+        selfRestarts: heartbeat.selfRestarts || 0,
+        selfRestartsToday: selfRestartsToday(Date.now()),
+        lastSelfRestartAt: heartbeat.lastSelfRestartAt || null,
         intervalMinutes: currentInterval || s.intervalMinutes,
         matchedCount: runtime.lastMatchCount,
       },
@@ -3083,6 +3335,13 @@ app.get('/health/watch', (req, res) => {
     watchdogRestarts: heartbeat.restarts || 0,
     failStreak: heartbeat.failStreak || 0,
     staleUnlocks: heartbeat.staleUnlocks || 0,
+    // 프로세스를 통째로 다시 띄운 횟수. 오늘치가 상한에 닿아 있으면 재기동으로
+    // 안 고쳐지는 문제가 돌고 있다는 뜻이다 — 밖에서 바로 보여야 한다.
+    selfRestarts: heartbeat.selfRestarts || 0,
+    selfRestartsToday: selfRestartsToday(now),
+    selfRestartMaxPerDay: SELF_RESTART_MAX_PER_DAY,
+    lastSelfRestartAt: heartbeat.lastSelfRestartAt || null,
+    lastSelfRestartReason: heartbeat.lastSelfRestartReason || null,
     // 백오프 상태. '왜 설정한 간격보다 늦게 도는지' 를 밖에서 바로 알 수 있어야 한다.
     intervalMinutes: currentInterval || null,
     nextDelayMinutes: currentDelayMinutes || null,
@@ -4684,10 +4943,27 @@ app.listen(PORT, () => {
     } catch (e) {
       console.error('[watchdog] 점검 예외(무시):', e.message);
     }
+    // 같은 틱에 새벽 정기 재기동도 본다. 워치독이 예외로 죽어도 이쪽은 돌아야 하므로
+    // try 를 따로 둔다.
+    try {
+      dailyRestartTick();
+    } catch (e) {
+      console.error('[restart] 정기 재기동 점검 예외(무시):', e.message);
+    }
   }, WATCHDOG_TICK_MS);
   console.log(
     `[server] 워치독 등록 (${WATCHDOG_TICK_MS / 60000}분 간격 점검 · ` +
       `${WATCHDOG_STALL_MS / 60000}분 정지 시 재시작)`
+  );
+  console.log(
+    '[restart] 자가 재기동 설정 — ' +
+      (DAILY_RESTART_HOUR >= 0 ? `새벽 ${DAILY_RESTART_HOUR}시 정기` : '정기 재기동 끔') +
+      ' · ' +
+      (SELF_RESTART_AFTER_FAILS
+        ? `연속 실패 ${SELF_RESTART_AFTER_FAILS}회`
+        : '연속 실패 재기동 끔') +
+      ` · 하루 상한 ${SELF_RESTART_MAX_PER_DAY}회(초과 시 경보)` +
+      (heartbeat.selfRestarts ? ` · 누적 ${heartbeat.selfRestarts}회` : '')
   );
 
   // Railway 절전 대비 자체 핑 (공개 URL 을 알 때만)

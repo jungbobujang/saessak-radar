@@ -276,6 +276,42 @@ Railway 등 배포 환경에서는 **Variables** 탭에 `ADMIN_PASSWORD` 를 추
 > 설정 간격만 보면, 48분 뒤를 예약해 둔 상태를 30분째에 '정지' 로 오인해 강제 수집을 걸고
 > 백오프가 무력화된다.
 
+### 프로세스를 통째로 다시 띄우는 3겹 (OOM 대비)
+
+위의 여섯 겹은 전부 **루프**를 살리는 장치다. 프로세스는 그대로 두므로, 문제가 루프가
+아니라 **프로세스에 쌓인 것(메모리)** 일 때는 아무리 되살려도 같은 자리에서 다시 죽는다.
+크로뮴이 뜨고 지는 사이에 남는 것이 조금씩 누적되고, 컨테이너가 한도에 닿는 순간
+수집이 통째로 유실된다. 그래서 프로세스를 버리는 장치를 세 겹 더 둔다.
+
+| 겹 | 장치 | 기본값 | 하는 일 | 텔레그램 |
+|---|---|---|---|---|
+| ① | **새벽 정기 재기동** `DAILY_RESTART_HOUR` | 04시(KST) | 쌓인 것을 매일 한 번 0 으로 되돌린다 (예방) | 보내지 않음 |
+| ② | **연속 실패 자가재기동** `SELF_RESTART_AFTER_FAILS` | 5회 | 이미 이상해진 프로세스를 스스로 버린다 (치료) | ♻️ 발신 |
+| ③ | **하루 상한 초과 경보** `SELF_RESTART_MAX_PER_DAY` | 3회 | ②가 반복되면 **더 재기동하지 않고** 사람을 부른다 (포기) | 🚨 발신 |
+
+- **재기동 = `process.exit(1)`.** Railway 의 재시작 정책(ON_FAILURE)이 새 컨테이너를 띄운다.
+  `0` 으로 나가면 '할 일을 마치고 정상 종료했다' 로 읽혀 다시 띄우지 않는 호스팅이 있어
+  일부러 1 로 나간다. 상태는 전부 볼륨(`DATA_DIR`)에 있으므로 재기동해도 잃는 것이 없다.
+- **나가기 전에 순서가 있다.** 하트비트 기록 → 텔레그램 발신(상한 10초) → 크로뮴 종료 →
+  exit. 죽고 난 뒤에는 아무것도 남길 수 없으므로 기록이 가장 먼저다.
+- **수집 중에는 나가지 않는다.** ②는 락이 풀린 뒤에만, ①은 `isCollecting` 이 아닐 때만
+  판정한다. 도는 수집을 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
+- **③은 경보만 하고 멈춰 선다.** 오늘 이미 세 번 다시 태어났는데 또 실패한다면 재기동으로
+  고쳐지는 문제가 아니다. 거기서 또 나가면 호스팅의 재시작 한도만 태우고 원인은 그대로다.
+  이 경보는 **하루 한 번만** 간다(도배 금지). 감시 루프 자체는 계속 돌며 재시도한다.
+
+**재기동 루프를 막는 두 개의 빗장** — 자동 재기동에서 제일 위험한 것은 무한 재기동이다.
+
+1. `failStreak` 는 볼륨에 남는다. 부활 직후 실패 1회면 임계(5)를 곧바로 다시 넘긴다.
+   그래서 재기동 시점의 값을 `failStreakAtLastRestart` 로 같이 남기고, **그 뒤로 다시 5회**
+   쌓였을 때만 나간다. (5회 → 재기동 → 6·7·8·9회는 버팀 → 10회에 두 번째 재기동)
+2. ①은 04시대의 **앞 10분** 안에서만 걸고, **재기동 후 15분** 이 지나야 다시 건다.
+   창(10분)이 최소 생존 시간(15분)보다 짧으므로, 하트비트 파일 쓰기가 실패해도
+   같은 시간대에 두 번 나갈 수 없다.
+
+정기 재기동이 텔레그램을 보내지 않는 이유는 단순하다 — 매일 새벽 4시에 울리는 알림은
+정보가 아니라 소음이다. 기록은 `heartbeat.json`(`lastDailyRestartDate`)과 로그에 남는다.
+
 ### 하트비트 (`DATA_DIR/heartbeat.json`)
 
 매 사이클마다 시작·종료를 파일에 남긴다. 볼륨에 있으므로 **재배포·재시작해도 유지**되고,
@@ -283,8 +319,16 @@ Railway 등 배포 환경에서는 **Variables** 탭에 `ADMIN_PASSWORD` 를 추
 
 ```json
 { "lastStartAt": "...", "lastFinishAt": "...", "lastOk": true,
-  "lastError": null, "lastReason": "cron", "lastMs": 4210, "restarts": 0 }
+  "lastError": null, "lastReason": "cron", "lastMs": 4210, "restarts": 0,
+  "failStreak": 0, "staleUnlocks": 0,
+  "selfRestarts": 0, "selfRestartsToday": 0, "selfRestartDate": "2026-08-23",
+  "failStreakAtLastRestart": 0, "lastSelfRestartAt": null,
+  "lastSelfRestartReason": null, "lastDailyRestartDate": "2026-08-23" }
 ```
+
+`selfRestarts*` 는 프로세스를 통째로 다시 띄운 기록이다. 메모리 변수는 재기동과 함께
+사라지므로 '오늘 몇 번 다시 태어났는지' 는 파일에만 남길 수 있다 — 하루 상한(3회) 판정이
+이 값에 걸려 있다.
 
 상태바의 **"마지막 확인"은 `lastFinishAt`(끝난 시각)** 이다. 시작 시각을 쓰면 매달려 죽은
 사이클이 한동안 "방금 확인" 으로 보여 사고를 놓친다. `restarts` 는 워치독이 되살린 누적 횟수로,
@@ -302,6 +346,8 @@ Railway 등 배포 환경에서는 **Variables** 탭에 `ADMIN_PASSWORD` 를 추
 curl -s https://<도메인>/health/watch
 # {"ok":true,"lastCheckedAt":"...","idleMinutes":3,"stallMinutes":30,
 #  "collecting":false,"watchdogRestarts":0,"failStreak":0,"staleUnlocks":0,
+#  "selfRestarts":0,"selfRestartsToday":0,"selfRestartMaxPerDay":3,
+#  "lastSelfRestartAt":null,"lastSelfRestartReason":null,
 #  "intervalMinutes":10,"nextDelayMinutes":10,"backoffFactor":1}
 ```
 
@@ -339,6 +385,10 @@ curl -s https://<도메인>/health/watch
 
 컨테이너 메모리를 줄일 계획이라면 **수집 1회에 최소 400MB 는 필요하다**는 것을 기준으로 잡는다
 (크로뮴 334MB + Node RSS 100MB). 512MB 한도는 평시에도 여유가 거의 없다.
+
+4. **그래도 쌓이면 프로세스를 버린다.** 위 세 규칙은 '덜 쓰기' 지 '안 쌓이기' 가 아니다.
+   매일 새벽 4시 정기 재기동과 연속 실패 5회 자가 재기동이 마지막 그물이다
+   (→ [프로세스를 통째로 다시 띄우는 3겹](#프로세스를-통째로-다시-띄우는-3겹-oom-대비)).
 
 ---
 
