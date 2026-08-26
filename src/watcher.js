@@ -78,6 +78,18 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
+// ---- 서비스 라벨 (SERVICE_LABEL) ----
+// 리전별 서비스를 여러 개 띄우면 알림 문구가 서로 완전히 똑같아서 어느 서비스가
+// 보낸 것인지 구분되지 않는다. 이 값을 주면 모든 텔레그램 메시지 맨 앞에 [라벨] 이 붙는다.
+// 미설정이면 아무것도 붙지 않는다 — 단일 서비스 운영과 문구가 100% 동일하다.
+const SERVICE_LABEL = String(process.env.SERVICE_LABEL || '').trim();
+
+// 텔레그램 머리말 접두. sendTelegram 한 곳에서만 붙이므로 모든 알림 경로
+// (모집 시작·신규·리마인더·정보 변경·새 분류·테스트·수집 실패·감시 정지)가 함께 적용된다.
+function labelPrefix() {
+  return SERVICE_LABEL ? `[${escapeHtml(SERVICE_LABEL)}] ` : '';
+}
+
 // "[운영기관] 프로그램명" 라벨 (기관명 없으면 프로그램명만)
 function withInst(institution, title) {
   const inst = String(institution || '').trim();
@@ -189,17 +201,19 @@ function notifyPayload(entry) {
 // opts.link 이 있으면 본문 링크는 그대로 두고, 인라인 키보드 버튼("🔗 신청 페이지 열기")을 함께 붙인다.
 async function sendTelegram(html, opts = {}) {
   const { link } = opts;
+  // 서비스 라벨은 여기 한 곳에서만 붙인다 → 알림 경로가 늘어도 자동으로 따라온다.
+  const text = labelPrefix() + html;
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
     console.warn('[watcher] TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 — 발송 생략');
-    console.log('[미발송 메시지]\n' + html.replace(/<[^>]+>/g, ''));
+    console.log('[미발송 메시지]\n' + text.replace(/<[^>]+>/g, ''));
     return false;
   }
   try {
     const payload = {
       chat_id: chatId,
-      text: html,
+      text,
       parse_mode: 'HTML',
       disable_web_page_preview: false,
     };
@@ -529,7 +543,9 @@ async function sendTestAlert() {
     title: '[테스트] 새싹 레이더 알림 점검',
     status: '모집 중',
     type: '방문형',
-    regions: ['서울·인천권'],
+    // 특정 권역을 박아 두면 다른 리전 서비스에서 리허설을 돌렸을 때
+    // "감시 조건이 잘못됐나" 하는 오해를 부른다. 서비스 라벨을 따르고, 없으면 중립 문구.
+    regions: [SERVICE_LABEL || '감시 대상 권역'],
     levels: ['초등학교'],
     tags: ['일반형'], // buildMessage 가 '#' 를 붙여 #일반형 으로 렌더
     link: 'https://newsac.kosac.re.kr/',
@@ -637,6 +653,7 @@ async function sendReminder(kind, id, d, st) {
 }
 
 module.exports = {
+  SERVICE_LABEL,
   checkOnce,
   checkReminders,
   matchesSettings,
