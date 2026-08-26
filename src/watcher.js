@@ -154,6 +154,83 @@ function matchesSettings(card, settings) {
   return true;
 }
 
+// ---- 기록된 스냅샷을 '현재' 조건으로 다시 판정 ----
+//
+// matchesSettings 는 방금 수집한 카드를 받는다. 아래 둘은 이미 파일에 남은 것
+// (state 스냅샷 · 감지 로그 항목)을 지금 설정으로 다시 재는 데 쓴다.
+// 조건은 언제든 바뀌는데 기록은 그대로 남기 때문에, 기록을 '지금 기준' 으로
+// 다시 보려면 판정을 한 번 더 해야 한다.
+//
+// 따로 두는 이유는 기록에 필드가 없을 수 있어서다 — 예전 로그는 권역을 아예
+// 적지 않았다. 없는 필드로 탈락시키면 '조건 밖' 이 아니라 '모르는 것' 을 숨기게
+// 된다. 그래서 아는 항목만 따지고, 모르면 통과시킨다.
+//
+// 판정 규칙은 matchesSettings 와 같다 — 카테고리 안은 OR, 카테고리끼리는 AND.
+
+// 값 하나 또는 배열이 체크 목록에 걸리는지. 조건이 비었거나 기록이 없으면 통과.
+function hitsAny(value, wanted) {
+  if (!wanted || !wanted.length) return true; // 조건 없음 → 전체 통과
+  if (value == null) return true; // 기록에 없음 → 판정 보류
+  const arr = Array.isArray(value) ? value : [value];
+  if (!arr.length) return true;
+  return arr.some((v) => wanted.includes(v));
+}
+
+// 권역·학교급·프로그램 유형만 본다. 교육대상·모집상태는 일부러 뺐다.
+//  · 교육대상: 새 분류 감지는 '알 수 없는 태그' 를 찾는 일이라, 태그 조건으로
+//    거르면 목적 자체가 사라진다(모르는 태그는 어차피 조건에 없다).
+//  · 모집상태: 리마인더는 이미 '모집 예정' 으로 좁힌 뒤에 이 함수를 부른다.
+function matchesScope(snap, settings) {
+  if (!snap) return true; // 스냅샷이 없으면 판정할 근거가 없다
+  return (
+    hitsAny(snap.type, settings.programType) &&
+    hitsAny(snap.regions, settings.regions) &&
+    hitsAny(snap.levels, settings.schoolLevels)
+  );
+}
+
+// 화면 표시용 판정 — 권역·학교급·유형 + 교육대상.
+// 모집상태는 보지 않는다. 로그 한 줄은 '그때 일어난 일' 이지 현재 상태가 아니라서,
+// 지금 설정의 모집상태로 지난 기록을 지우면 이력이 이상해진다.
+function matchesRecord(snap, settings) {
+  if (!snap) return true;
+  if (!matchesScope(snap, settings)) return false;
+  if (snap.tags != null && settings.targets && settings.targets.length) {
+    const tags = Array.isArray(snap.tags) ? snap.tags : [snap.tags];
+    if (tags.length) {
+      const wantKeys = new Set();
+      let wantUnknown = false;
+      for (const t of settings.targets) {
+        const k = classify.canonicalKey(t);
+        if (k) wantKeys.add(k);
+        else if (classify.stripWs(t) === classify.stripWs(classify.UNCLASSIFIED))
+          wantUnknown = true;
+      }
+      const hit = tags.some((tag) => {
+        const k = classify.canonicalKey(tag);
+        return k ? wantKeys.has(k) : wantUnknown;
+      });
+      if (!hit) return false;
+    }
+  }
+  return true;
+}
+
+// 감지 로그 한 줄에서 판정에 쓸 필드만 추린다. 조건 필드가 하나도 없으면
+// (예전 로그) null 을 돌려주고, 부르는 쪽에서 '판정 불가' 로 다룬다.
+function conditionOf(entry) {
+  if (!entry) return null;
+  const has =
+    entry.type != null || entry.regions != null || entry.levels != null || entry.tags != null;
+  if (!has) return null;
+  return {
+    type: entry.type,
+    regions: entry.regions,
+    levels: entry.levels,
+    tags: entry.tags,
+  };
+}
+
 function isTelegramConfigured() {
   return !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
 }
@@ -311,13 +388,19 @@ async function checkOnce({ reason } = {}) {
   }
 
   // ---- 알 수 없는(신설/변경) 분류 라벨 감지 → 미분류 수집 + 1회 텔레그램 알림 ----
-  // 수집 자체는 이미 전체를 대상으로 하므로 별도 필터 없이 '발견 보고'만 담당한다.
+  // '발견 보고' 만 담당한다(수집 자체는 이미 전체가 대상이다).
+  //
+  // 다만 권역·학교급·유형까지 전국으로 열어 두면, 경상권만 보는 서비스가 서울 프로그램의
+  // 새 분류를 알려 온다. 그래서 matchesScope 로 내 관심 범위까지만 좁힌다.
+  // 교육대상(targets)으로는 거르지 않는다 — 여기서 찾는 건 '조건에 없는 태그' 라서
+  // 태그 조건을 걸면 찾을 대상이 통째로 사라진다.
   try {
     const metaU = storage.getMeta();
     const alerted = new Set(metaU.alertedLabels || []);
     const freshUnknown = [];
     const seenThisCycle = new Set();
     for (const c of cards) {
+      if (!matchesScope(c, settings)) continue;
       for (const tag of c.tags || []) {
         const t = String(tag || '').trim();
         if (!t || classify.canonicalKey(t)) continue; // 알려진 분류는 통과
@@ -399,6 +482,13 @@ async function checkOnce({ reason } = {}) {
       link: n.card.link,
       sent,
       delivery: deliveryOf(wantSend, sent),
+      // 조건 필드 — 나중에 조건이 바뀌었을 때 이 기록을 다시 판정하려면 필요하다.
+      // (기록은 지우지 않는다. 화면에서 걸러 보기 위한 재료일 뿐이다)
+      id: n.card.id,
+      type: n.card.type,
+      regions: n.card.regions,
+      levels: n.card.levels,
+      tags: n.card.tags,
     });
     console.log(
       `[watcher] 감지(${n.kind}): ${n.card.title} [${n.card.status}] send=${wantSend} sent=${sent}`
@@ -470,6 +560,12 @@ async function checkOnce({ reason } = {}) {
             sent: chgSent,
             delivery: chgDelivery,
             changes: desc,
+            // 조건 필드는 스냅샷에서 가져온다 (상세 응답에는 권역·학교급이 없다)
+            id,
+            type: state[id] && state[id].type,
+            regions: state[id] && state[id].regions,
+            levels: state[id] && state[id].levels,
+            tags: state[id] && state[id].tags,
           });
           console.log(`[watcher] 정보 변경: ${withInst(institution, title)} — ${desc}`);
         }
@@ -570,6 +666,11 @@ async function sendTestAlert() {
     link: card.link,
     sent,
     delivery: telegram,
+    id: card.id,
+    type: card.type,
+    regions: card.regions,
+    levels: card.levels,
+    tags: card.tags,
   };
   storage.appendLog(entry);
   console.log(`[watcher] 테스트 알림 발송 telegram=${telegram}`);
@@ -597,6 +698,10 @@ async function checkReminders() {
     const status = (st && st.status) || d.status;
     if (status !== '모집 예정') continue;
     if (!d.applyStartAt) continue;
+    // 조건이 바뀌어도 details/state 는 지워지지 않는다. 그래서 여기서 한 번 더 잰다 —
+    // 이걸 빼면 권역을 바꾼 뒤에도 옛 권역 프로그램의 리마인더가 계속 나간다.
+    // (스냅샷이 없어 판정할 수 없는 건은 예전처럼 보낸다)
+    if (!matchesScope(st, settings)) continue;
 
     const startMs = new Date(d.applyStartAt).getTime();
     if (isNaN(startMs) || startMs <= nowMs) continue; // 이미 지난 건 제외
@@ -647,6 +752,11 @@ async function sendReminder(kind, id, d, st) {
     link,
     sent: ok,
     delivery: deliveryOf(true, ok),
+    id,
+    type: st && st.type,
+    regions: st && st.regions,
+    levels: st && st.levels,
+    tags: st && st.tags,
   });
   console.log(`[watcher] 리마인더(${kind}): ${label} sent=${ok}`);
   return ok;
@@ -657,6 +767,9 @@ module.exports = {
   checkOnce,
   checkReminders,
   matchesSettings,
+  matchesScope,
+  matchesRecord,
+  conditionOf,
   runtime,
   sendTelegram,
   fmtKstDateTime,

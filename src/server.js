@@ -48,6 +48,8 @@ const {
   ddayKst,
   notifyPayload,
   isTelegramConfigured,
+  matchesRecord,
+  conditionOf,
 } = require('./watcher');
 const { withTimeout, closeAllBrowsers } = require('./scraper');
 
@@ -820,22 +822,43 @@ app.get('/', (req, res) => {
     change: '<span class="badge badge-change">정보 변경</span>',
     'new-label': '<span class="badge badge-newlabel">새 분류</span>',
   };
-  const logRows = log
-    .slice(0, 20)
-    .map((l) => {
+  // ---- 최근 감지: 기록은 그대로, 화면에서만 현재 조건으로 거른다 ----
+  //
+  // 감지 로그는 '그때의 조건' 으로 쌓인다. 조건을 바꿔도(권역 변경 등) 지난 기록은
+  // 그대로 남으므로, 거르지 않으면 지금 안 보는 권역의 항목이 계속 목록에 뜬다.
+  // 지우지는 않는다 — 기록은 보존하고, 보이는 것만 줄인다(토글로 되돌릴 수 있다).
+  //
+  // 예전 로그에는 조건 필드가 아예 없다. 그런 줄은 링크로 감시 스냅샷을 뒤져 보강하고,
+  // 그래도 모르면 '판정 불가' 로 두고 숨기지 않는다 — 모르는 것을 조건 밖으로
+  // 몰아 버리면 기록이 사라진 것처럼 보인다.
+  const byLink = stateByLink();
+
+  // 토글을 눌렀을 때 다시 불러오지 않아도 되도록 여유분까지 그려 두고,
+  // 실제로 보여줄 20줄은 브라우저에서 고른다.
+  const RECENT_RENDER = 60;
+  const recent = log
+    .slice(0, RECENT_RENDER)
+    .map((l) => ({ l, scope: logScopeOf(l, s, byLink) }));
+  const outCount = recent.filter((r) => r.scope === 'out').length;
+
+  const logRows = recent
+    .map(({ l, scope }) => {
       const badge = badgeMap[l.kind] || badgeMap.new;
       const time = relativeTime(l.at, Date.now());
       const hasLink = !!l.link;
       const gonow = hasLink ? '<span class="gonow">↗ 이동</span>' : '';
+      // 조건 밖 항목에는 왜 평소에 안 보이는지 표시를 남긴다 (전체 보기에서만 보인다)
+      const outMark =
+        scope === 'out' ? '<span class="logout" title="현재 감시 조건 밖">조건 밖</span>' : '';
       // 로그 줄에서는 [운영기관] 프로그램명을 말줄임 처리 (logtitle 에서 ellipsis)
-      const inner = `${badge}${ratingOf(l.institution, s).mark}
+      const inner = `${badge}${outMark}${ratingOf(l.institution, s).mark}
         <span class="logtitle">${escapeHtml(instLabel(l.institution, l.title))}</span>
         <span class="logtime">${escapeHtml(time)}</span>
         ${gonow}`;
       // 링크 있는 항목: 줄 전체를 새 탭 링크로. 링크 없는 항목(테스트 등)은 클릭 비활성.
       return hasLink
-        ? `<a class="logrow logrow-link" href="${escapeHtml(l.link)}" target="_blank" rel="noopener">${inner}</a>`
-        : `<div class="logrow logrow-disabled">${inner}</div>`;
+        ? `<a class="logrow logrow-link" data-scope="${scope}" href="${escapeHtml(l.link)}" target="_blank" rel="noopener">${inner}</a>`
+        : `<div class="logrow logrow-disabled" data-scope="${scope}">${inner}</div>`;
     })
     .join('');
 
@@ -865,7 +888,14 @@ app.get('/', (req, res) => {
                aria-label="지금 즉시 확인 (관리자 전용)">🔒 지금 즉시 확인</button>`}
       </div>
       <div id="checkResult" class="muted small"></div>
-      <div class="loglist">${logRows || '<div class="muted small">아직 감지된 항목이 없습니다.</div>'}</div>
+      <div class="ifilters" id="scopeFilter">
+        <button type="button" class="fchip on" data-scope-mode="in"
+          title="현재 감시 조건에 맞는 것만 보기">감시 조건만 보기</button>
+        <button type="button" class="fchip" data-scope-mode="all"
+          title="조건 밖 항목까지 전부 보기 (기록은 늘 남아 있습니다)">전체 보기</button>
+        <span class="muted small" id="scopeNote"></span>
+      </div>
+      <div class="loglist" id="loglist">${logRows || '<div class="muted small">아직 감지된 항목이 없습니다.</div>'}</div>
     </div>`;
   const sections =
     planner.openReady >= 1 ? planner.html + recentSection : recentSection + planner.html;
@@ -929,6 +959,84 @@ app.get('/', (req, res) => {
           location.reload();
         });
       }
+
+      // ---- 최근 감지 범위 토글 ----
+      // 서버가 여유분(60줄)까지 data-scope 를 달아 그려 두었다. 여기서는 어떤 줄을
+      // 보일지만 고른다 → 토글이 즉시 먹고 서버를 다시 부르지 않는다.
+      //   in  = 현재 조건 통과 · out = 조건 밖 · na = 판정 불가(예전 기록) · sys = 서비스 알림
+      // 'out' 만 감춘다. na/sys 는 조건과 무관하므로 어느 모드에서든 보인다.
+      (function () {
+        const box = document.getElementById('scopeFilter');
+        const list = document.getElementById('loglist');
+        if (!box || !list) return;
+        const note = document.getElementById('scopeNote');
+        const KEY = 'sr_recent_scope';
+        const SHOW = 20; // 조건 안에서 보여줄 줄 수 (기존과 같다)
+        // 조건 밖은 따로 센다. 한 덩어리로 20줄을 세면, 조건을 바꾼 직후처럼
+        // 조건 밖 항목이 목록 아래쪽에 몰려 있을 때 '전체 보기' 를 눌러도
+        // 위쪽 20줄이 그대로라 아무것도 안 늘어난다 — 토글이 무의미해진다.
+        const SHOW_OUT = 20;
+
+        function apply(mode) {
+          const rows = list.querySelectorAll('.logrow');
+          let shown = 0;
+          let shownOut = 0;
+          let hiddenOut = 0;
+          rows.forEach((row) => {
+            const scope = row.getAttribute('data-scope');
+            const isOut = scope === 'out';
+            let visible;
+            if (isOut) {
+              visible = mode === 'all' && shownOut < SHOW_OUT;
+              if (visible) shownOut += 1;
+              else hiddenOut += 1;
+            } else {
+              visible = shown < SHOW;
+              if (visible) shown += 1;
+            }
+            row.style.display = visible ? '' : 'none';
+          });
+          shown += shownOut;
+          box.querySelectorAll('[data-scope-mode]').forEach((b) => {
+            b.classList.toggle('on', b.getAttribute('data-scope-mode') === mode);
+          });
+          if (note) {
+            note.textContent =
+              mode === 'all'
+                ? (shownOut ? '조건 밖 ' + shownOut + '건 포함' : '조건 밖 항목 없음')
+                : (hiddenOut ? '조건 밖 ' + hiddenOut + '건 숨김' : '');
+          }
+          if (!shown) {
+            let empty = list.querySelector('.scope-empty');
+            if (!empty) {
+              empty = document.createElement('div');
+              empty.className = 'muted small scope-empty';
+              empty.textContent = '조건에 맞는 감지 기록이 없습니다.';
+              list.appendChild(empty);
+            }
+            empty.style.display = '';
+          } else {
+            const empty = list.querySelector('.scope-empty');
+            if (empty) empty.style.display = 'none';
+          }
+        }
+
+        let mode = 'in';
+        try {
+          if (localStorage.getItem(KEY) === 'all') mode = 'all';
+        } catch (e) {}
+        apply(mode);
+
+        box.addEventListener('click', (e) => {
+          const b = e.target.closest('[data-scope-mode]');
+          if (!b) return;
+          const next = b.getAttribute('data-scope-mode');
+          try {
+            localStorage.setItem(KEY, next);
+          } catch (e2) {}
+          apply(next);
+        });
+      })();
 
       const btn = document.getElementById('checkBtn');
       const out = document.getElementById('checkResult');
@@ -3196,8 +3304,13 @@ app.post('/api/test-alert', requireAdmin, async (req, res) => {
 app.get('/api/notifications', (req, res) => {
   try {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    // 화면(최근 감지)과 같은 기준으로 거른다. 여기만 안 걸면 목록에서 감춘 항목이
+    // 브라우저 알림으로 튀어나온다 — 조건을 바꾼 직후 아직 안 읽은 기록이 그렇다.
+    const nSettings = storage.getSettings();
+    const nByLink = stateByLink();
     const items = storage
       .getLog()
+      .filter((l) => logScopeOf(l, nSettings, nByLink) !== 'out')
       .slice(0, limit)
       .map((l) => ({
         at: l.at,
@@ -3361,6 +3474,37 @@ function escapeHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ---- 감지 로그를 '지금' 조건으로 다시 재기 ----
+//
+// 로그는 그때의 조건으로 쌓이고 지워지지 않는다. 조건을 바꾸면(권역 변경 등)
+// 지난 기록이 그대로 남아 목록·알림에 계속 끼어든다. 기록은 보존한 채,
+// 보이는 것과 나가는 것만 지금 조건으로 거르기 위한 공통 판정이다.
+//
+//   in  현재 조건 통과 · out 조건 밖 · na 판정 불가(예전 기록) · sys 서비스 자체 알림
+//
+// 'out' 만 감춘다. 'na' 를 감추면 조건 필드가 없던 시절 기록이 통째로 사라진 것처럼
+// 보이고, 'sys'(테스트·새 분류)는 권역과 무관한 서비스 알림이다.
+const SYSTEM_LOG_KINDS = { test: 1, 'new-label': 1 };
+
+// 예전 로그 보강용 링크 → 감시 스냅샷 맵. 스냅샷에는 권역·학교급이 들어 있다.
+function stateByLink() {
+  const byLink = {};
+  const snap = storage.getState();
+  for (const id of Object.keys(snap)) {
+    const v = snap[id];
+    if (v && v.link) byLink[v.link] = v;
+  }
+  return byLink;
+}
+
+function logScopeOf(entry, settings, byLink) {
+  if (!entry) return 'na';
+  if (SYSTEM_LOG_KINDS[entry.kind]) return 'sys';
+  const cond = conditionOf(entry) || conditionOf(byLink && byLink[entry.link]);
+  if (!cond) return 'na';
+  return matchesRecord(cond, settings) ? 'in' : 'out';
 }
 
 // 서비스 라벨 꼬리표 "[경기] " — SERVICE_LABEL 미설정이면 빈 문자열이라 화면이 그대로다.
@@ -4000,7 +4144,12 @@ function renderPlanner() {
     })
     .join('');
 
-  const changeLogs = storage.getLog().filter((l) => l.kind === 'change').slice(0, 5);
+  // 정보 변경도 최근 감지와 같은 기준으로 거른다 (기록은 그대로, 표시만)
+  const chgByLink = stateByLink();
+  const changeLogs = storage
+    .getLog()
+    .filter((l) => l.kind === 'change' && logScopeOf(l, s, chgByLink) !== 'out')
+    .slice(0, 5);
   const changeRows = changeLogs
     .map(
       (l) => `<div class="chgrow">
@@ -4343,6 +4492,9 @@ function pageShell(title, body) {
   .fchip { background:var(--surface-1); color:var(--text-secondary); border:1px solid var(--line);
     border-radius:999px; padding:5px 13px; font-size:12.5px; font-weight:700; cursor:pointer; }
   .fchip.on { background:#eaf6ef; border-color:#bfe4cd; color:var(--green-d); }
+  /* 최근 감지: 조건 밖 표시 ('전체 보기' 에서만 화면에 나온다) */
+  .logout { flex:none; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;
+    background:var(--surface-1); color:var(--text-muted); border:1px solid var(--line); }
   .ilist { border-top:1px solid var(--line); }
   .irow { border-bottom:1px solid var(--line); }
   .irow > summary { display:flex; align-items:center; gap:10px; padding:10px 2px; cursor:pointer;
