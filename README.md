@@ -49,6 +49,7 @@ npm start
 | `TELEGRAM_CHAT_ID` | 알림 받을 채팅 ID |
 | `DATA_DIR` | 상태 저장 경로 (비우면 `./data`) |
 | `ADMIN_PASSWORD` | 설정/알림 보호용 관리자 비밀번호 (미설정 시 보호 없음) |
+| `PRACTICE_PASSWORD` | 연습 전용 비밀번호 — `/practice` 만 열린다 (미설정 시 `ADMIN_PASSWORD` 하나만 통함) |
 | `SEASON_YEAR` | 수집 대상 시즌 연도 (비우면 `2026`) — 사이트 목록 API 의 `season` 파라미터 |
 | `REGION_FILTER` | **첫 부팅** 감시 권역. 콤마 다중 (예: `경기권,강원·충청권`). 비우면 `서울·인천권` |
 | `SERVICE_LABEL` | 서비스 라벨. 텔레그램 알림 머리말과 웹 헤더에 `[라벨]` 로 붙는다. 비우면 표시 없음 |
