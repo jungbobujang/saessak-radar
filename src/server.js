@@ -38,6 +38,7 @@ const storage = require('./storage');
 const classify = require('./classify');
 const { migrate } = require('./migrate');
 const {
+  SERVICE_LABEL,
   checkOnce,
   checkReminders,
   runtime,
@@ -673,7 +674,7 @@ app.get('/', (req, res) => {
     <div class="header">
       <!-- 이미 대시보드다 → 눌러도 이동이 아니라 새로고침. href 는 그대로 두어
            JS 가 죽어도, 새 탭으로 열어도 대시보드로 가게 한다. -->
-      <a class="logo" href="/" id="logoHome" title="새로고침" aria-label="대시보드 새로고침">🌱 새싹 레이더</a>
+      <a class="logo" href="/" id="logoHome" title="새로고침" aria-label="대시보드 새로고침">🌱 ${labelTag()}새싹 레이더</a>
       ${navTabs('home')}
     </div>
 
@@ -1113,7 +1114,7 @@ app.get('/settings', requireAuth, (req, res) => {
 
   res.send(pageShell('감시 조건 설정', `
     <div class="header">
-      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🌱 감시 조건 설정</a>
+      <a class="logo" href="/" title="홈으로" aria-label="대시보드로 이동">🌱 ${labelTag()}감시 조건 설정</a>
       ${navTabs('settings')}
     </div>
 
@@ -3084,6 +3085,12 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// 서비스 라벨 꼬리표 "[경기] " — SERVICE_LABEL 미설정이면 빈 문자열이라 화면이 그대로다.
+// 리전별 서비스를 여러 개 열어 두었을 때 탭 제목만 보고도 어느 서비스인지 알게 한다.
+function labelTag() {
+  return SERVICE_LABEL ? `[${escapeHtml(SERVICE_LABEL)}] ` : '';
+}
+
 function fmtTime(iso) {
   try {
     const d = new Date(iso);
@@ -3791,7 +3798,7 @@ function pageShell(title, body) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)} · 새싹 레이더</title>
+<title>${labelTag()}${escapeHtml(title)} · 새싹 레이더</title>
 <style>
   :root {
     --green:#22a95f; --green-d:#178a4c; --bg:#f6f9f6; --ink:#1c2a22; --muted:#8a988f; --line:#e6ede8;

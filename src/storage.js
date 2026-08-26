@@ -129,9 +129,28 @@ function migrateInstitutionRecord(row) {
   return { rec, changed };
 }
 
+// ---- 첫 부팅 감시 권역 (REGION_FILTER) ----
+// 리전별 서비스를 나눠 띄울 때, 볼륨이 빈 상태에서 무엇을 감시할지 정한다.
+// 콤마로 여러 권역을 줄 수 있다 (예: REGION_FILTER=경기권,강원·충청권).
+// 권역명 자체에 가운뎃점(·)이 들어가므로 구분자는 콤마만 쓴다.
+//
+// ⚠ 이것은 어디까지나 '기본값'이다. DATA_DIR/settings.json 이 이미 있으면
+//   저장본이 이긴다(getSettings 의 전개 순서). 즉 이 변수를 바꿔도 운영 중인
+//   서비스의 감시 조건은 바뀌지 않는다 — 설정 화면에서 바꿔야 한다.
+//   기존 서비스에 이 변수를 뒤늦게 붙여도 아무 영향이 없다는 뜻이기도 하다.
+function envRegions() {
+  const raw = process.env.REGION_FILTER;
+  if (raw == null) return null;
+  const list = String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length);
+  return list.length ? list : null; // 빈 문자열·콤마만 있는 값은 미설정으로 본다
+}
+
 const DEFAULT_SETTINGS = {
   programType: ['방문형'],
-  regions: ['서울·인천권'],
+  regions: envRegions() || ['서울·인천권'],
   schoolLevels: ['초등학교'],
   statuses: ['모집 예정', '모집 중'],
   // 교육대상 기본값 (사이트 실측 코드: C0601 일반형 · C0603 이주배경 · C0606 교육복지우선지원사업 학교)
