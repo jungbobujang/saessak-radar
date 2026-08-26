@@ -281,8 +281,19 @@
 6. **1번 서비스(서울·인천권)에도 `REGION_FILTER` 를 넣을지** — 기존 볼륨엔 `settings.json` 이
    이미 있어 A안이면 아무 영향이 없다. B안이면 기존 UI 가 잠기므로 사전 합의가 필요하다.
 
-> §7-1(A/B안), §7-2(값 형식)은 이후 A안·콤마 다중으로 확정되어 구현했다. §8·§9 참조.
-> 나머지 3·4·5·6 은 여전히 미결.
+### 7-1. 결정 결과 (2026-08-26 확정)
+
+| # | 항목 | 결정 |
+|---|---|---|
+| 1 | `REGION_FILTER` 성격 | **A안** — 첫 부팅 기본값만. UI 잠그지 않음 |
+| 2 | 값 형식 | **콤마 다중** · 각 값 trim · 구분자는 콤마만 |
+| 3 | 권역 외 조건도 env 로 뺄지 | **현행 유지** — 빼지 않는다 |
+| 4 | 텔레그램 분리 방식 | **같은 봇 + 다른 챗ID** |
+| 5 | `SERVICE_LABEL` 도입 | **도입** (§9) |
+| 6 | 1번 서비스에도 `REGION_FILTER` | **명시한다** — README 에 적힌 대로 |
+| — | `.env.example` 의 `ADMIN_PASSWORD` 누락 | **보완** — `PRACTICE_PASSWORD` 와 함께 추가 (§10) |
+
+미결 항목은 없다.
 
 ---
 
@@ -345,6 +356,41 @@ git cherry -v origin/main oom-fix
 ②가 가장 덜 파괴적이다. 어느 쪽이든 **`59d8ba2` 와 `eef3f2d` 가 같은 기능인지**를
 먼저 확인해야 한다 — 이 판단은 두 구현을 다 아는 사람이 해야 한다.
 
+### 8-1. 처리 결과 — ② 이식안 실행 (2026-08-26)
+
+`origin/main`(`b28cb5f`)에서 **`multi-region-v2`** 를 따고 이번 작업분만 cherry-pick 했다.
+
+```
+git checkout -b multi-region-v2 origin/main
+git cherry-pick 2997661
+Auto-merging .env.example / README.md / src/server.js   ← 충돌 0건
+```
+
+`src/storage.js`·`src/watcher.js` 는 두 브랜치에서 애초에 동일해서 그대로 붙었고,
+나머지 3개도 자동 병합됐다. **origin/main 쪽 구조를 그대로 유지**한다.
+
+**`59d8ba2` 와 `eef3f2d` 는 역시 같은 기능의 다른 구현**이었다 — 환경변수 이름이 다르다.
+
+| oom-fix (`59d8ba2`) | origin/main (`eef3f2d` 계열) |
+|---|---|
+| `MAINTENANCE_HOUR` | `DAILY_RESTART_HOUR` |
+| `MAINTENANCE_WINDOW_MIN` | `DAILY_RESTART_WINDOW_MIN` |
+| `MAINTENANCE_MIN_UPTIME_MIN` | `DAILY_RESTART_MIN_UPTIME_MIN` |
+| `FAIL_RESTART_STREAK` | `SELF_RESTART_AFTER_FAILS` |
+| `RESTART_ALERT_PER_DAY` | `SELF_RESTART_MAX_PER_DAY` |
+| `RESTART_EXIT_CODE` | (없음 — `exit(1)` 고정) |
+| — | `SELF_RESTART_MIN_UPTIME_MIN`, `BACKOFF_AFTER_FAILS`, `BACKOFF_MAX_MIN`, `NODE_MAX_OLD_SPACE_MB` |
+
+**origin/main 쪽이 더 나아가 있다**(백오프·Node 힙 상한·최소 생존 시간까지 있음).
+`59d8ba2` 는 이식하지 않고 버렸다 — 중복 구현이라 가져오면 같은 기능이 두 벌이 된다.
+
+> ⚠ **§5 의 환경변수 목록 중 재기동 관련 6개는 이제 위 표의 오른쪽 이름을 쓴다.**
+> `MAINTENANCE_*`·`FAIL_RESTART_STREAK`·`RESTART_ALERT_PER_DAY`·`RESTART_EXIT_CODE` 는
+> `origin/main` 계열에 존재하지 않는다. 최신 목록은 `.env.example` 을 볼 것.
+
+**보관**: `oom-fix` → `oom-fix-stale`, `origin/multi-region` → `origin/multi-region-stale`
+로 이름만 바꿔 남겼다(커밋 `2997661`). 삭제하지 않았다 — **2026-09-02 이후 정리 예정.**
+
 ---
 
 ## 9. 구현 기록 (A안 — 기본값만, UI 잠금 없음)
@@ -389,9 +435,45 @@ git cherry -v origin/main oom-fix
 - 설정 화면 권역 체크박스 → **경기권만 `checked`**, 나머지 4개 해제
 - 생성된 `settings.json` → `"regions": ["경기권"]`
 
+### 이식 후 재검증 (23건 전부 통과)
+
+`multi-region-v2`(= origin/main 구조) 에서 위 18건을 다시 돌리고, **3종 방어와의 접점 5건을
+추가**했다. `node --check` 4파일 통과.
+
+**[5] origin/main 3종 방어(자가 재기동) 계열과의 접점**
+
+- `server.js` 가 `api.telegram.org` 를 직접 호출하지 않는다 → 우회 발송 경로 없음
+- `server.js` 는 `watcher` 의 `sendTelegram` 을 import 한다
+- `server.js` 의 `sendTelegram` 호출 **3곳** — 재기동 알림 · 반복 재기동 경보 · 감시 정지 감지
+- `withTimeout(sendTelegram(html), 10000, '재기동 알림')` **감싼 호출에도 접두가 붙는다**
+  (`notifyBeforeExit` 과 같은 호출 모양으로 실제 실행해 확인)
+- 재기동 알림 본문은 그대로 유지
+
+→ 접두를 `sendTelegram()` 한 곳에만 붙인 설계 덕분에, **다른 세션이 나중에 추가한
+3종 방어 알림 3개도 코드를 더 고치지 않고 라벨을 달았다.** 어긋나는 지점 없음.
+
+**실서버 기동 재확인** (포트 3998, 임시 `DATA_DIR`, 첫 수집 30초 전 종료 → 사이트 무접속).
+`SERVICE_LABEL=경기 REGION_FILTER='경기권,강원·충청권' DAILY_RESTART_HOUR=-1`:
+
+- 기동 로그 정상 — `[restart] 자가 재기동 설정 — 정기 재기동 끔 · 연속 실패 5회 · 하루 상한 3회`
+- `<title>` `[경기] 새싹 레이더 · 새싹 레이더` / 로고 `🌱 [경기] 새싹 레이더`
+- 설정 페이지 `[경기] 감시 조건 설정`
+- **권역 체크박스 경기권·강원·충청권 둘 다 `checked`**, 나머지 3개 해제 (콤마 다중 실동작 확인)
+- `settings.json` → `"regions": ["경기권", "강원·충청권"]`
+
 ### 남은 자잘한 것
 
 - 대시보드 `<title>` 이 `새싹 레이더 · 새싹 레이더` 로 중복된다. **이번 변경 이전부터 있던 것**이고
   (`pageShell('새싹 레이더', …)` + pageShell 이 붙이는 `· 새싹 레이더`), 범위 밖이라 두었다.
-- `.env.example` 에 `ADMIN_PASSWORD` 가 여전히 빠져 있다(README 표에만 있음). 이번 지시 범위
-  밖이라 손대지 않았다. §5 참조.
+
+---
+
+## 10. 문서 보완 — `.env.example` 누락 (§7-1 마지막 줄)
+
+`ADMIN_PASSWORD`·`PRACTICE_PASSWORD` 둘 다 코드는 읽고 있는데(`server.js` `authEnabled()` /
+`practiceEnabled()`) `.env.example` 에는 항목이 없었다. `ADMIN_PASSWORD` 는 README 표에만
+있었고, `PRACTICE_PASSWORD` 는 표에도 없어 **두 등급 구조 자체가 문서에서 보이지 않았다.**
+
+- `.env.example` — 두 변수 추가. `ADMIN_PASSWORD` 는 보호 대상·공개 유지 목록까지 적었다
+  (비우면 보호가 통째로 꺼지는 값이라 배포에서 빠뜨리면 설정·수집 버튼이 그대로 열린다)
+- `README.md` 환경변수 표 — `PRACTICE_PASSWORD` 행 추가
