@@ -1219,6 +1219,27 @@ app.get('/', (req, res) => {
           });
         }
       })();
+
+      // ---- 잔여 게이지 차오름 (0 → 실제값, 400ms) ----
+      // 서버가 심어 둔 인라인 width 를 한 프레임 0 으로 눌렀다가 되돌린다.
+      // 이 스크립트가 죽어도 인라인 값이 그대로 남으므로 수치는 틀어지지 않는다
+      // (차오르는 연출만 사라진다).
+      (function gaugeFill() {
+        if (window.matchMedia &&
+            window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        var segs = Array.prototype.slice.call(document.querySelectorAll('.g3-app, .g3-pend'));
+        if (!segs.length) return;
+        var widths = segs.map(function (s) { return s.style.width || '0%'; });
+        segs.forEach(function (s) { s.style.width = '0%'; });
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            segs.forEach(function (s, i) {
+              s.classList.add('g3-anim');
+              s.style.width = widths[i];
+            });
+          });
+        });
+      })();
     </script>
   `));
 });
@@ -2868,7 +2889,7 @@ app.get('/practice', requireAuth, (req, res) => {
       function grade() {
         var bad = [];
         function fail(node, msg) {
-          if (node) node.classList.add('pf-bad');
+          markBad(node);
           bad.push(msg);
         }
         if (!el.addr.value) {
@@ -2934,9 +2955,9 @@ app.get('/practice', requireAuth, (req, res) => {
           if (!mEl.value) missing.push('분');
           if (!missing.length) return;
           // 비어 있는 칸만 붉게 표시한다
-          if (!dateEl.value) dateEl.classList.add('pf-bad');
-          if (!hEl.value) hEl.classList.add('pf-bad');
-          if (!mEl.value) mEl.classList.add('pf-bad');
+          if (!dateEl.value) markBad(dateEl);
+          if (!hEl.value) markBad(hEl);
+          if (!mEl.value) markBad(mEl);
           bad.push('교육 ' + which + '의 ' + missing.join('·') + ' 칸이 비었습니다');
         }
         checkDateTrio('시작일시', el.startDate, el.startH, el.startM);
@@ -2955,7 +2976,7 @@ app.get('/practice', requireAuth, (req, res) => {
         // 필수 약관은 유일한 '제출 차단' 조건이다 (실제 사이트와 같다)
         if (!el.agree1.checked || !el.agree2.checked) {
           [el.agree1, el.agree2].forEach(function (x) {
-            if (!x.checked) x.closest('.pf-agree').classList.add('pf-bad');
+            if (!x.checked) markBad(x.closest('.pf-agree'));
           });
           el.submitMsg.textContent = '필수 약관 2개에 모두 동의해야 신청할 수 있습니다.';
           el.submitMsg.className = 'pf-submitmsg pf-submitmsg-warn';
@@ -2997,6 +3018,24 @@ app.get('/practice', requireAuth, (req, res) => {
         el.apply.focus({ preventScroll: true });
       });
 
+      // 300ms 1회 흔들기. 연달아 누르면 매번 다시 흔들려야 하므로
+      // 클래스를 떼고 강제 리플로우로 애니메이션을 되감은 뒤 다시 붙인다.
+      function shakeOnce(node) {
+        if (!node) return;
+        if (window.matchMedia &&
+            window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        node.classList.remove('sr-shake');
+        void node.offsetWidth;
+        node.classList.add('sr-shake');
+      }
+
+      // 오답 표시 + 흔들기를 한 곳에 묶는다 (표시만 하고 흔들기를 빠뜨리는 걸 막는다).
+      function markBad(node) {
+        if (!node) return;
+        node.classList.add('pf-bad');
+        shakeOnce(node);
+      }
+
       // ---- 신청하기 ----
       el.apply.addEventListener('click', function () {
         if (phase === 'done') {
@@ -3010,6 +3049,7 @@ app.get('/practice', requireAuth, (req, res) => {
           missCount += 1;
           el.applyMsg.textContent = '아직 열리지 않았습니다 (헛클릭 ' + missCount + '회)';
           el.applyMsg.className = 'pr-applymsg pr-applymsg-warn';
+          shakeOnce(el.apply);
           return;
         }
         // 여기부터가 폼 계측 시작점이다 (신청하기 클릭 → 최종 [신청] 클릭).
@@ -3930,13 +3970,16 @@ function railHtml(c) {
 }
 
 // 좌측 레일 (오픈 예정): D-day 를 그대로 레일에 얹는다 (기존 색 규칙 유지)
-function railDdayHtml(dd) {
+// pulse=true 인 D-DAY 레일만 깜빡인다. 한 화면에서 동시에 뛰는 요소가 셋을 넘으면
+// 시선이 흩어져 신호 구실을 못 하므로, 호출부에서 가장 임박한 3개까지만 켠다.
+function railDdayHtml(dd, pulse) {
   if (dd == null) {
     return `<div class="rail rail-unknown"><div class="rail-num rail-num-sm">미정</div>
       <div class="rail-label">일시 미공지</div></div>`;
   }
   if (dd <= 0) {
-    return `<div class="rail rail-dday-now"><div class="rail-num rail-num-sm">D-DAY</div>
+    return `<div class="rail rail-dday-now${pulse ? ' rail-pulse' : ''}">
+      <div class="rail-num rail-num-sm">D-DAY</div>
       <div class="rail-label">오늘 오픈</div></div>`;
   }
   return `<div class="rail rail-dday"><div class="rail-num">D-${dd}</div>
@@ -4088,10 +4131,15 @@ function renderPlanner() {
   live.sort((a, b) => realRemainOf(b) - realRemainOf(a));
 
   // 오픈 예정 카드 — 레일은 D-day, 본문 3행(제목 / 차시·오픈일시·대상칩 / 정원)
+  // open 은 신청 시작 오름차순이라, 앞에서부터 세면 자연히 임박한 순으로 뽑힌다.
+  const PULSE_MAX = 3;
+  let pulsed = 0;
   const openRows = open
     .map((x) => {
       const start = x.detail && x.detail.applyStartAt;
       const dd = start ? ddayKst(start, nowMs) : null;
+      const pulse = dd != null && dd <= 0 && pulsed < PULSE_MAX;
+      if (pulse) pulsed += 1;
       const c = capacityOf(x);
       const metaHtml = [chaptersHtml(x), dateHtml(start, '')]
         .filter(Boolean)
@@ -4110,7 +4158,7 @@ function renderPlanner() {
       return `<a class="planrow ${rate.dim ? 'planrow-skip' : ''}" href="${escapeHtml(
         x.link || '#'
       )}" target="_blank" rel="noopener">
-        ${railDdayHtml(dd)}
+        ${railDdayHtml(dd, pulse)}
         <div class="pi-body">
           ${cardHead(x, s)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
@@ -4999,6 +5047,60 @@ function pageShell(title, body) {
     /* 그래도 넘치면 괄호 묶음만 통째로 다음 줄로 (숫자가 중간에서 갈리지 않게) */
     .cap-detail { white-space:nowrap; }
     .pi-tags, .tchips { min-width:0; }
+  }
+
+  /* ============ 모션 피드백 ============
+     원칙: transform·opacity 만 건드린다 · 150~600ms · 장식용 움직임 금지 ·
+     prefers-reduced-motion 이면 전부 끈다 (이 블록 맨 아래에서 일괄 차단).
+     움직임은 "지금 뭔가 바뀌었다" 를 알리는 신호로만 쓴다. */
+  @keyframes sr-pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.04); }
+  }
+  @keyframes sr-shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-5px); }
+    40% { transform: translateX(4px); }
+    60% { transform: translateX(-3px); }
+    80% { transform: translateX(2px); }
+  }
+  @keyframes sr-bounce {
+    0%   { transform: translateY(0)    scale(1); }
+    35%  { transform: translateY(-7px) scale(1.06); }
+    60%  { transform: translateY(0)    scale(1); }
+    78%  { transform: translateY(-3px) scale(1.02); }
+    100% { transform: translateY(0)    scale(1); }
+  }
+
+  /* ① 지금 이 순간 반응해야 하는 두 가지에만 건다 —
+        연습 화면의 '모집 중' 뱃지(화면당 1개)와 플래너의 D-DAY 레일(오늘 오픈).
+        '신규'·'정보 변경'·D-N 같은 나머지 뱃지로 번지면 동시에 뛰는 게 여럿이 되어
+        신호가 죽는다. 그래서 선택자를 이 둘로 못박는다. */
+  .pr-badge-open,
+  .rail-dday-now.rail-pulse { animation: sr-pulse 2s ease-in-out infinite; }
+
+  /* ② 잔여 게이지 차오름 — 카드가 처음 그려질 때만 0 → 실제값 400ms.
+        인라인 width 는 서버가 실제값으로 그대로 심어 두고 JS 가 잠깐 0 으로 눌렀다
+        되돌리는 방식이라, JS 가 죽으면 차오름만 사라지고 수치는 정확히 남는다. */
+  .g3-anim { transition: width 400ms ease-out; }
+
+  /* ③ 헛클릭(잠긴 [신청하기]) · 오답 항목 — 300ms 1회.
+        오답 표시(.pf-bad)에 직접 걸지 않는 이유: 채점할 때마다 .pf-bad 를 떼었다 다시 붙이는데,
+        같은 프레임 안의 제거+추가는 애니메이션을 되감지 않아 두 번째 제출부터 안 흔들린다.
+        그래서 JS(shakeOnce)가 리플로우로 되감아 붙이는 별도 클래스로 뺐다. */
+  .sr-shake { animation: sr-shake 300ms ease-in-out 1; }
+
+  /* ③ 결과 화면 신기록 — 기록 숫자만 1회 튄다 (트로피 태그는 가만히 둔다) */
+  .pr-result-best .pr-ms { animation: sr-bounce 520ms ease-out 1; }
+
+  /* 모션 끄기. 위에서 새로 넣은 움직임을 전부 되돌린다 —
+     이 화면에 남는 @keyframes 애니메이션은 0개가 된다. */
+  @media (prefers-reduced-motion: reduce) {
+    .pr-badge-open,
+    .rail-dday-now.rail-pulse,
+    .sr-shake,
+    .pr-result-best .pr-ms { animation: none !important; }
+    .g3-anim { transition: none !important; }
   }
 </style>
 </head>
