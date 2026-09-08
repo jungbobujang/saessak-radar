@@ -46,6 +46,7 @@ const {
   sendTelegram,
   fmtKstDateTime,
   ddayKst,
+  openPhaseKst,
   notifyPayload,
   isTelegramConfigured,
   matchesRecord,
@@ -3392,6 +3393,9 @@ app.get('/api/summary', (req, res) => {
           title: x.title || '',
           applyStartAt,
           dday: applyStartAt ? ddayKst(applyStartAt, nowMs) : null,
+          // dday 만 보면 지난 건과 오늘 건이 둘 다 0 이하로 뭉친다.
+          // 화면과 같은 규칙(future/today/past)을 쓰라고 phase 를 같이 내려보낸다.
+          openPhase: applyStartAt ? (openPhaseKst(applyStartAt, nowMs) || {}).phase || null : null,
           chapters: (x.detail && x.detail.totalChapters != null) ? x.detail.totalChapters : null,
           tags: tagsOf(x),
           link: x.link || '',
@@ -3969,20 +3973,30 @@ function railHtml(c) {
       <div class="rail-label">자리 남음</div></div>`;
 }
 
-// 좌측 레일 (오픈 예정): D-day 를 그대로 레일에 얹는다 (기존 색 규칙 유지)
+// 좌측 레일 (오픈 예정): 오픈까지 남은 상태를 레일에 얹는다 (기존 색 규칙 유지)
+//  ph 는 openPhaseKst() 의 결과 — future(D-N) / today(D-DAY) / past(오픈 경과).
+//  날짜만 세면 오픈 시각이 지난 건도 종일 D-DAY 로 남기 때문에 phase 로 가른다.
 // pulse=true 인 D-DAY 레일만 깜빡인다. 한 화면에서 동시에 뛰는 요소가 셋을 넘으면
 // 시선이 흩어져 신호 구실을 못 하므로, 호출부에서 가장 임박한 3개까지만 켠다.
-function railDdayHtml(dd, pulse) {
-  if (dd == null) {
+function railDdayHtml(ph, pulse) {
+  if (!ph) {
     return `<div class="rail rail-unknown"><div class="rail-num rail-num-sm">미정</div>
       <div class="rail-label">일시 미공지</div></div>`;
   }
-  if (dd <= 0) {
+  if (ph.phase === 'past') {
+    // 오픈 시각이 지났는데 아직 '모집 예정' 으로 남아 있는 건.
+    // 놓친 것일 수도, 사이트 표기가 늦은 것일 수도 있어 단정하지 않고 회색으로만 알린다.
+    // (모집 중으로 바뀐 건은 애초에 '지금 신청 가능' 그룹으로 가므로 여기 오지 않는다.)
+    const when = ph.days === 0 ? '오늘 지남' : `${Math.abs(ph.days)}일 전`;
+    return `<div class="rail rail-past"><div class="rail-num rail-num-xs">오픈 경과</div>
+      <div class="rail-label">${escapeHtml(when)}</div></div>`;
+  }
+  if (ph.phase === 'today') {
     return `<div class="rail rail-dday-now${pulse ? ' rail-pulse' : ''}">
       <div class="rail-num rail-num-sm">D-DAY</div>
       <div class="rail-label">오늘 오픈</div></div>`;
   }
-  return `<div class="rail rail-dday"><div class="rail-num">D-${dd}</div>
+  return `<div class="rail rail-dday"><div class="rail-num">D-${ph.days}</div>
       <div class="rail-label">오픈까지</div></div>`;
 }
 
@@ -4116,8 +4130,16 @@ function renderPlanner() {
   const live = cur.filter((x) => x.status === '모집 중');
   const openReady = open.filter((x) => x.detail && x.detail.applyStartAt).length;
 
-  // 그룹 A: 신청 시작 오름차순, 일시 미확인은 맨 아래
+  // 그룹 A: 오픈 임박 순. 오픈 시각이 지난 건(past)은 아래로 내리고, 일시 미확인은 맨 아래.
+  // 시각을 안 보고 날짜만 세면 지난 건이 오름차순 맨 앞을 차지해, 정작 오늘 열리는 건이
+  // 뒤로 밀리고 pulse 3장도 지난 건이 가져간다. 그래서 phase 를 1차 정렬키로 쓴다.
+  const phaseOf = (x) =>
+    x.detail && x.detail.applyStartAt ? openPhaseKst(x.detail.applyStartAt, nowMs) : null;
+  const rankOf = (ph) => (!ph ? 2 : ph.phase === 'past' ? 1 : 0);
   open.sort((a, b) => {
+    const ar = rankOf(phaseOf(a));
+    const br = rankOf(phaseOf(b));
+    if (ar !== br) return ar - br;
     const as = a.detail && a.detail.applyStartAt ? Date.parse(a.detail.applyStartAt) : null;
     const bs = b.detail && b.detail.applyStartAt ? Date.parse(b.detail.applyStartAt) : null;
     if (as != null && bs != null) return as - bs;
@@ -4130,15 +4152,16 @@ function renderPlanner() {
   // 실질 잔여 0(= 지금 신청하면 대기만)은 자연히 맨 아래로 모인다.
   live.sort((a, b) => realRemainOf(b) - realRemainOf(a));
 
-  // 오픈 예정 카드 — 레일은 D-day, 본문 3행(제목 / 차시·오픈일시·대상칩 / 정원)
-  // open 은 신청 시작 오름차순이라, 앞에서부터 세면 자연히 임박한 순으로 뽑힌다.
+  // 오픈 예정 카드 — 레일은 오픈까지 남은 상태, 본문 3행(제목 / 차시·오픈일시·대상칩 / 정원)
+  // 위 정렬로 '오늘 오픈' 이 맨 앞에 시각 오름차순으로 서므로, 앞에서부터 세면
+  // 진짜 임박한 순서대로 뽑힌다 (지난 건은 아래로 빠져 pulse 를 가져가지 않는다).
   const PULSE_MAX = 3;
   let pulsed = 0;
   const openRows = open
     .map((x) => {
       const start = x.detail && x.detail.applyStartAt;
-      const dd = start ? ddayKst(start, nowMs) : null;
-      const pulse = dd != null && dd <= 0 && pulsed < PULSE_MAX;
+      const ph = phaseOf(x);
+      const pulse = !!ph && ph.phase === 'today' && pulsed < PULSE_MAX;
       if (pulse) pulsed += 1;
       const c = capacityOf(x);
       const metaHtml = [chaptersHtml(x), dateHtml(start, '')]
@@ -4158,7 +4181,7 @@ function renderPlanner() {
       return `<a class="planrow ${rate.dim ? 'planrow-skip' : ''}" href="${escapeHtml(
         x.link || '#'
       )}" target="_blank" rel="noopener">
-        ${railDdayHtml(dd, pulse)}
+        ${railDdayHtml(ph, pulse)}
         <div class="pi-body">
           ${cardHead(x, s)}
           <div class="pi-meta">${metaHtml}${targetChipsHtml(x)}</div>
@@ -4446,6 +4469,8 @@ function pageShell(title, body) {
     justify-content:center; padding:10px 4px; text-align:center; }
   .rail-num { font-size:20px; font-weight:800; line-height:1.1; letter-spacing:-0.03em; }
   .rail-num-sm { font-size:14px; }
+  /* '오픈 경과' 는 네 글자라 14px 로는 56px 안쪽(레일 폭 64 - 좌우 패딩)에 한 줄로 안 들어간다 */
+  .rail-num-xs { font-size:12px; }
   .rail-label { font-size:10px; font-weight:700; margin-top:3px; opacity:.85; line-height:1.2; }
   .rail-ok { background:var(--rail-ok-bg); color:var(--rail-ok-fg); }
   .rail-soon { background:var(--rail-soon-bg); color:var(--rail-soon-fg); }
@@ -4453,6 +4478,9 @@ function pageShell(title, body) {
   .rail-dday { background:var(--rail-dday-bg); color:var(--rail-dday-fg); }
   .rail-dday-now { background:var(--rail-full-bg); color:var(--rail-full-fg); }
   .rail-unknown { background:var(--surface-1); color:var(--text-muted); }
+  /* 오픈 시각이 지났는데 아직 '모집 예정' 인 건 — 회색으로만 알리고 pulse 는 걸지 않는다.
+     '미정'(rail-unknown)보다는 한 단계 진한 글자색으로 둘을 구분한다. */
+  .rail-past { background:var(--surface-1); color:var(--text-secondary); }
   .pi-body { flex:1; min-width:0; padding:10px 12px; transition:background .12s; }
   .pi-head { display:flex; align-items:center; gap:7px; min-width:0; }
   .pi-inst { color:var(--text-muted); font-weight:400; font-size:12px; white-space:nowrap;

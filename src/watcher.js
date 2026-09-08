@@ -54,6 +54,39 @@ function ddayKst(iso, nowMs) {
   const db = Date.parse(kstYmd(nowMs) + 'T00:00:00+09:00');
   return Math.round((da - db) / 86400000);
 }
+// KST 시:분. 저장된 문자열이 +09:00 이든 Z 든 같은 답이 나오게 Intl 로 뽑는다.
+function kstHm(ms) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const g = (t) => parseInt((parts.find((x) => x.type === t) || {}).value, 10) || 0;
+  return { h: g('hour') % 24, m: g('minute') };
+}
+
+// 신청 오픈까지의 상태를 셋으로 가른다.
+//   future : 아직 오지 않은 날      → D-N
+//   today  : 오늘이고 오픈 시각 전  → D-DAY
+//   past   : 오픈 시각이 지남       → '오픈 경과'
+//
+// 날짜만 세면 오픈 시각이 지난 건도 종일 D-DAY 로 남는다(그래서 지난 건이 D-DAY 로 보였다).
+// 시각이 있는 건은 그 시각을, 시각이 없는 건(수집기가 00:00 으로 채운다)은
+// 그날 23:59:59 를 기준선으로 삼는다 — 오픈 시각을 모르는 건을 자정부터 '지남' 으로
+// 접으면 아직 열리지도 않은 프로그램을 놓치게 되므로, 모르면 하루를 다 준다.
+function openPhaseKst(iso, nowMs) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const days = ddayKst(iso, nowMs);
+  const hm = kstHm(t);
+  const timeKnown = !(hm.h === 0 && hm.m === 0);
+  if (days > 0) return { phase: 'future', days, timeKnown };
+  const cutoff = timeKnown ? t : Date.parse(kstYmd(t) + 'T23:59:59+09:00');
+  return { phase: nowMs <= cutoff ? 'today' : 'past', days, timeKnown };
+}
+
 // 신청 시작일 "전날 21:00"(KST) 의 ms
 function prevDay21Kst(iso) {
   const t = new Date(iso).getTime();
@@ -774,6 +807,7 @@ module.exports = {
   sendTelegram,
   fmtKstDateTime,
   ddayKst,
+  openPhaseKst,
   sendTestAlert,
   isTelegramConfigured,
   notifyPayload,
