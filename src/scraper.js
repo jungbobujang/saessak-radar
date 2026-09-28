@@ -122,32 +122,89 @@ const GATE_WAIT_MS = SCRAPE_TIMEOUT_MS + 15000;
 // 위해 필요하다. 이 장부가 없으면 새 사이클이 헌 크로뮴 위에 겹쳐 떠서 메모리가 두 배가 된다.
 const liveBrowsers = new Set();
 
+// 닫기에 실패한 브라우저의 누적 실패 횟수. 두 번 실패하면 마지막 수단(SIGKILL)을 쓴다.
+const closeFailures = new Map();
+
+/**
+ * 닫기를 시도하고 '실제로 닫혔는지' 를 돌려준다.
+ * 예전에는 결과를 버렸는데, 그러면 호출자가 "닫혔다고 치고" 장부에서 지워 버려
+ * 못 닫은 크로뮴이 추적 불가능한 고아가 된다(≈334MB). 그래서 성공 여부를 반드시 돌려준다.
+ */
 async function closeQuietly(label, what, obj) {
-  if (!obj) return;
+  if (!obj) return true;
   try {
     await withTimeout(Promise.resolve(obj.close()), CLOSE_TIMEOUT_MS, `${label} ${what}.close`);
+    return true;
   } catch (e) {
     // 이미 죽은 프로세스를 닫으려는 경우가 대부분이다. 다음 주기를 막을 이유가 없다.
     console.warn(`[scraper] ${label} ${what}.close 실패(무시): ${e.message}`);
+    return false;
   }
 }
 
+// 마지막 수단. close() 가 두 번 실패한 브라우저는 OS 에게 직접 죽여 달라고 한다.
+// playwright 의 browser.process() 는 로컬 기동일 때만 자식 프로세스를 준다(원격이면 null).
+function hardKill(browser) {
+  try {
+    const proc = typeof browser.process === 'function' ? browser.process() : null;
+    if (proc && typeof proc.kill === 'function') {
+      proc.kill('SIGKILL');
+      return true;
+    }
+  } catch (e) {
+    console.error(`[scraper] SIGKILL 실패: ${e.message}`);
+  }
+  return false;
+}
+
 /**
- * 지금 살아 있는 크로뮴을 전부 닫는다. 몇 개를 닫았는지 돌려준다.
+ * 지금 살아 있는 크로뮴을 전부 닫는다. 실제로 정리된 개수를 돌려준다.
  * 스케줄러가 '죽은 락' 을 강제로 풀거나 워치독이 루프를 재시작할 때, 새 수집을 띄우기
  * 전에 반드시 이걸 먼저 부른다. 매달린 page.evaluate 도 브라우저가 죽으면 함께 끝난다.
+ *
+ * 닫기에 실패한 브라우저는 장부에 남겨 둔다 — 다음 기회에 다시 시도하기 위해서다.
+ * 두 번째 실패부터는 SIGKILL 로 끝낸다(그래도 안 죽으면 장부에 남겨 계속 시도한다).
  */
 async function closeAllBrowsers(reason) {
   const list = Array.from(liveBrowsers);
   if (list.length === 0) return 0;
   console.warn(`[scraper] 살아 있는 브라우저 ${list.length}개를 강제로 닫습니다 (${reason})`);
+  let cleaned = 0;
   await Promise.all(
     list.map(async (b) => {
-      await closeQuietly('강제 정리', 'browser', b);
-      liveBrowsers.delete(b);
+      const ok = await closeQuietly('강제 정리', 'browser', b);
+      if (ok) {
+        liveBrowsers.delete(b);
+        closeFailures.delete(b);
+        cleaned += 1;
+        return;
+      }
+      const fails = (closeFailures.get(b) || 0) + 1;
+      closeFailures.set(b, fails);
+      if (fails >= 2) {
+        const killed = hardKill(b);
+        console.error(
+          `[scraper] 브라우저 닫기 ${fails}회 실패 — ` +
+            (killed ? 'SIGKILL 로 강제 종료했습니다' : 'SIGKILL 도 불가(장부에 남겨 재시도)')
+        );
+        if (killed) {
+          liveBrowsers.delete(b);
+          closeFailures.delete(b);
+          cleaned += 1;
+          return;
+        }
+      }
+      console.warn(
+        `[scraper] 브라우저를 닫지 못했습니다(${fails}회) — 장부에 남겨 다음 기회에 다시 시도합니다`
+      );
     })
   );
-  return list.length;
+  return cleaned;
+}
+
+// 지금 장부에 남아 있는(=아직 못 닫은) 브라우저 수. /health 가 읽어 '터지기 전'을 보여 준다.
+function liveBrowserCount() {
+  return liveBrowsers.size;
 }
 
 // ---- 브라우저 단일화 게이트 ------------------------------------------------
@@ -238,8 +295,19 @@ async function runInBrowser(label, fn) {
     await closeQuietly(label, 'page', page);
     await closeQuietly(label, 'context', context);
     if (browser) {
-      liveBrowsers.delete(browser);
-      await closeQuietly(label, 'browser', browser);
+      // 순서가 중요하다. 예전에는 장부에서 먼저 지우고 닫았는데, close 가 15초 상한을
+      // 넘겨 실패하면 그 크로뮴은 장부에 없으니 closeAllBrowsers 가 영영 못 찾는
+      // 고아(≈334MB)가 됐다. 실제로 닫힌 것만 장부에서 뺀다.
+      const ok = await closeQuietly(label, 'browser', browser);
+      if (ok) {
+        liveBrowsers.delete(browser);
+        closeFailures.delete(browser);
+      } else {
+        console.error(
+          `[scraper] ${label}: 브라우저를 닫지 못해 장부에 남겨 둡니다 — ` +
+            '다음 closeAllBrowsers 에서 다시 시도합니다'
+        );
+      }
     }
     release();
   }
@@ -480,9 +548,13 @@ module.exports = {
   scrape,
   fetchDetails,
   closeAllBrowsers,
+  liveBrowserCount,
+  closeQuietly,
   // 브라우저 수명주기(단일화 게이트·강제 종료·정리)를 사이트 없이 검증하기 위해 노출한다.
   // 수집 로직에서 이걸 직접 부를 일은 없다 — scrape/fetchDetails 를 쓴다.
   runInBrowser,
+  // 고아 크로뮴 회수를 가짜 browser 객체로 검증하기 위한 장부 자체. 테스트 전용이다.
+  liveBrowsers,
   withTimeout,
   mapDetail,
   seasonYear,

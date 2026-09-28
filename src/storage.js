@@ -12,6 +12,7 @@ const META_PATH = path.join(DATA_DIR, 'meta.json'); // 마지막 전체 갱신�
 const REMINDERS_PATH = path.join(DATA_DIR, 'reminders.json'); // 오픈 리마인더 발송 이력
 const HEARTBEAT_PATH = path.join(DATA_DIR, 'heartbeat.json'); // 감시 루프 하트비트(재시작해도 유지)
 const INSTITUTIONS_PATH = path.join(DATA_DIR, 'institutions.json'); // 기관 평가(사용자 입력)
+const OUTBOX_PATH = path.join(DATA_DIR, 'outbox.json'); // 텔레그램 이월 큐(예산 초과분)
 
 // 기관 목록 시드. 레포에 포함되고, 사용자 평가만 DATA_DIR 에 따로 저장한다.
 // (DATA_DIR 은 볼륨이라 재배포해도 평가가 유지되고, 기관이 추가되면 시드만 고치면 된다)
@@ -293,6 +294,22 @@ function appendLog(entry) {
   return trimmed;
 }
 
+// ---- '새 소식' 읽음 표시 ----
+// 알림 목록 자체는 log.json(최근 200건)이 그대로 쓰인다. 별도 표를 만들지 않는다 —
+// 이미 같은 것을 담고 있고, 두 벌이 되면 어긋나는 순간 어느 쪽이 맞는지 알 수 없다.
+// 여기서는 '어디까지 읽었는지' 시각 하나만 서버에 남긴다(기기가 바뀌어도 따라오게).
+function getNotificationsReadAt() {
+  const meta = getMeta();
+  return meta.notificationsReadAt || null;
+}
+
+function setNotificationsReadAt(iso) {
+  const meta = getMeta();
+  meta.notificationsReadAt = iso || new Date().toISOString();
+  saveMeta(meta);
+  return meta.notificationsReadAt;
+}
+
 // ---- 상세 캐시 (details.json) ----
 function getDetails() {
   return readJson(DETAILS_PATH, {});
@@ -337,6 +354,34 @@ function getReminders() {
 }
 function saveReminders(map) {
   writeJson(REMINDERS_PATH, map);
+}
+
+// ---- 텔레그램 이월 큐 (outbox.json) ----
+// 한 사이클의 텔레그램 예산(60초)을 다 쓰면 남은 알림을 여기 넣고 사이클은 성공으로 끝낸다.
+// 다음 사이클이 먼저 이걸 비운다. 볼륨에 있으므로 재기동해도 살아남는다 —
+// '알림이 늦는 것' 과 '알림이 사라지는 것' 은 전혀 다른 문제라서 반드시 파일에 남겨야 한다.
+//
+// 모양: { items: [{ key, html, link, at, tries }], deferredTotal, sentTotal, droppedTotal }
+const DEFAULT_OUTBOX = { items: [], deferredTotal: 0, sentTotal: 0, droppedTotal: 0 };
+
+function getOutbox() {
+  const raw = readJson(OUTBOX_PATH, null);
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_OUTBOX };
+  return {
+    items: Array.isArray(raw.items) ? raw.items.filter((x) => x && x.key && x.html) : [],
+    deferredTotal: Number(raw.deferredTotal) || 0,
+    sentTotal: Number(raw.sentTotal) || 0,
+    droppedTotal: Number(raw.droppedTotal) || 0,
+  };
+}
+
+function saveOutbox(box) {
+  writeJson(OUTBOX_PATH, {
+    items: Array.isArray(box.items) ? box.items : [],
+    deferredTotal: Number(box.deferredTotal) || 0,
+    sentTotal: Number(box.sentTotal) || 0,
+    droppedTotal: Number(box.droppedTotal) || 0,
+  });
 }
 
 // ---- 기관 평가 (institutions.json) ----
@@ -466,4 +511,8 @@ module.exports = {
   saveHeartbeat,
   getReminders,
   saveReminders,
+  getOutbox,
+  saveOutbox,
+  getNotificationsReadAt,
+  setNotificationsReadAt,
 };
