@@ -264,8 +264,21 @@ function conditionOf(entry) {
   };
 }
 
+// ---- 텔레그램은 선택 기능이다 ----
+// 기본은 꺼짐. NOTIFY_TELEGRAM=1 이고 토큰·채팅 ID 가 둘 다 있을 때만 보낸다.
+// 알림의 본래 자리는 홈페이지의 '새 소식' 이고, 텔레그램은 그 위에 얹는 선택지다.
+// (동료 지역 서비스는 자기 Railway 에서 이 변수만 켜면 된다)
+// 환경변수를 캐시하지 않고 매번 읽는다 — 테스트가 켜고 끌 수 있어야 한다.
+function telegramEnabled() {
+  return process.env.NOTIFY_TELEGRAM === '1';
+}
+
 function isTelegramConfigured() {
-  return !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
+  return !!(
+    telegramEnabled() &&
+    process.env.TELEGRAM_BOT_TOKEN &&
+    process.env.TELEGRAM_CHAT_ID
+  );
 }
 
 // ---- 발송 결과 구분 ----
@@ -292,6 +305,7 @@ const NOTIF_HEAD = {
   reminder: '🔔 [오픈 리마인더]',
   change: '📅 [정보 변경]',
   'new-label': '🆕 [새 분류]',
+  fail: '⚠️ [수집 실패]', // 조건과 무관한 시스템 소식. 홈페이지 '새 소식'에만 뜬다
   test: '🔴 [모집 시작]', // 테스트는 '모집 시작' 알림과 완전히 같은 모양으로 나간다
 };
 
@@ -307,6 +321,159 @@ function notifyPayload(entry) {
   };
 }
 
+// ---- 텔레그램 발송 상한 ----
+// 1건당 상한. 이걸 안 걸면 Node fetch 가 무한정 매달려 사이클(4분)을 통째로 태운다.
+const SEND_TIMEOUT_MS = Number(process.env.TELEGRAM_SEND_TIMEOUT_MS) || 10000;
+// 429(한도 초과) 재시도 대기 상한. 이보다 길게 기다리라고 하면 이월 큐로 보낸다.
+const RETRY_AFTER_CAP_MS = 30000;
+// 한 사이클에서 텔레그램에 쓸 수 있는 총 시간. 넘으면 남은 알림을 다음 사이클로 이월한다.
+const CYCLE_TELEGRAM_BUDGET_MS = Number(process.env.TELEGRAM_CYCLE_BUDGET_MS) || 60000;
+// 이월 큐가 무한정 자라지 않게. 오래된 것부터 버린다(버린 수는 /health 에 남는다).
+const OUTBOX_MAX = Number(process.env.TELEGRAM_OUTBOX_MAX) || 200;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 켜짐/꺼짐을 시작할 때 딱 한 줄만 알린다. 매 건 찍으면 로그가 무의미해진다.
+if (!telegramEnabled()) {
+  console.log('[watcher] 텔레그램 알림 꺼짐 (켜려면 NOTIFY_TELEGRAM=1) — 알림은 홈페이지 "새 소식"에 쌓입니다');
+} else if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+  console.warn('[watcher] NOTIFY_TELEGRAM=1 이지만 TELEGRAM_BOT_TOKEN/CHAT_ID 가 없어 보내지 않습니다');
+} else {
+  console.log('[watcher] 텔레그램 알림 켜짐');
+}
+
+// 로그에 봇 토큰이 섞여 나가지 않게 지운다. fetch 오류 메시지에 URL 이 통째로
+// 들어오는 경우가 있어(특히 DNS·TLS 오류) 한 번 걸러서 찍는다.
+function scrubToken(text) {
+  let s = String(text == null ? '' : text);
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (token) s = s.split(token).join('<TOKEN>');
+  // 토큰이 바뀌었거나 다른 형태로 들어와도 bot<숫자>:<문자열> 모양은 무조건 가린다.
+  return s.replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot<TOKEN>');
+}
+
+// ---- 사이클 텔레그램 예산 ----
+// 알림이 느리거나 실패해도 '수집' 은 성공으로 끝나야 한다. 예산을 다 쓰면 남은 알림을
+// 이월 큐에 넣고 사이클을 정상 종료한다. failStreak 는 수집 실패만 센다(§checkOnce).
+let cycleBudget = null;
+
+function beginTelegramCycle() {
+  cycleBudget = { startedMs: Date.now(), exceeded: false, deferred: 0, sent: 0 };
+  return cycleBudget;
+}
+
+function budgetLeftMs() {
+  if (!cycleBudget) return CYCLE_TELEGRAM_BUDGET_MS;
+  return CYCLE_TELEGRAM_BUDGET_MS - (Date.now() - cycleBudget.startedMs);
+}
+
+function budgetExceeded() {
+  if (!cycleBudget) return false;
+  if (cycleBudget.exceeded) return true;
+  if (budgetLeftMs() <= 0) {
+    cycleBudget.exceeded = true;
+    return true;
+  }
+  return false;
+}
+
+// 이월 큐에 넣는다. 같은 key 는 두 번 들어가지 않는다(중복 발송 방지).
+function deferNotification(key, html, link) {
+  const box = storage.getOutbox();
+  if (box.items.some((x) => x.key === key)) return false;
+  box.items.push({ key, html, link: link || '', at: new Date().toISOString(), tries: 0 });
+  box.deferredTotal += 1;
+  if (box.items.length > OUTBOX_MAX) {
+    const drop = box.items.length - OUTBOX_MAX;
+    box.items.splice(0, drop);
+    box.droppedTotal += drop;
+    console.error(`[watcher] 이월 큐가 ${OUTBOX_MAX}건을 넘어 오래된 ${drop}건을 버렸습니다`);
+  }
+  storage.saveOutbox(box);
+  if (cycleBudget) cycleBudget.deferred += 1;
+  return true;
+}
+
+/**
+ * 예산 안에서 보낸다. 예산을 다 썼으면 보내지 않고 이월 큐에 넣는다.
+ * 돌려주는 값: { sent, deferred }
+ * 어떤 경우에도 예외를 던지지 않는다 — 알림이 수집을 무너뜨리면 안 된다.
+ */
+async function sendBudgeted(key, html, opts = {}) {
+  // 꺼져 있거나 미설정이면 '실패' 가 아니다. 이월해 봐야 영원히 못 보내므로 큐에 넣지 않는다.
+  // (알림은 이미 log.json 에 남아 홈페이지 '새 소식' 으로 간다 — 잃는 것이 없다)
+  if (!isTelegramConfigured()) return { sent: false, deferred: false };
+  if (budgetExceeded()) {
+    const ok = deferNotification(key, html, opts.link);
+    console.warn(
+      `[watcher] 텔레그램 예산(${CYCLE_TELEGRAM_BUDGET_MS / 1000}초) 초과 — ` +
+        (ok ? '다음 사이클로 이월합니다' : '이미 이월된 알림이라 건너뜁니다') + ` key=${key}`
+    );
+    return { sent: false, deferred: ok };
+  }
+  let sent = false;
+  try {
+    sent = await sendTelegram(html, opts);
+  } catch (e) {
+    // sendTelegram 은 스스로 삼키지만 만에 하나를 위해 한 겹 더 둔다.
+    console.error('[watcher] 발송 중 예외(무시):', scrubToken(e && e.message));
+    sent = false;
+  }
+  if (sent && cycleBudget) cycleBudget.sent += 1;
+  // 보낸 뒤 예산을 다시 본다 — 이 한 건이 예산을 넘겼다면 다음 건부터 이월된다.
+  budgetExceeded();
+  return { sent, deferred: false };
+}
+
+/**
+ * 이월 큐를 먼저 비운다. 사이클 맨 앞에서 부른다.
+ * 성공한 것만 큐에서 빼고, 예산이 떨어지면 나머지는 그대로 남겨 둔다.
+ */
+async function flushOutbox() {
+  const box = storage.getOutbox();
+  if (!box.items.length) return { sent: 0, left: 0 };
+  if (!isTelegramConfigured()) return { sent: 0, left: box.items.length };
+
+  console.log(`[watcher] 이월된 알림 ${box.items.length}건을 먼저 보냅니다`);
+  const left = [];
+  let sent = 0;
+  for (const item of box.items) {
+    if (budgetExceeded()) {
+      left.push(item);
+      continue;
+    }
+    let ok = false;
+    try {
+      ok = await sendTelegram(item.html, { link: item.link });
+    } catch (e) {
+      console.error('[watcher] 이월 발송 예외(무시):', scrubToken(e && e.message));
+    }
+    if (ok) {
+      sent += 1;
+      box.sentTotal += 1;
+    } else {
+      item.tries = (item.tries || 0) + 1;
+      left.push(item);
+    }
+    budgetExceeded();
+  }
+  box.items = left;
+  storage.saveOutbox(box);
+  if (sent) console.log(`[watcher] 이월분 ${sent}건 발송 완료 (남은 ${left.length}건)`);
+  return { sent, left: left.length };
+}
+
+// 이월 큐 현황 — /health 가 읽는다.
+function outboxStatus() {
+  const box = storage.getOutbox();
+  return {
+    pending: box.items.length,
+    deferredTotal: box.deferredTotal,
+    sentTotal: box.sentTotal,
+    droppedTotal: box.droppedTotal,
+  };
+}
+
 // ---- 텔레그램 발송 ----
 // opts.link 이 있으면 본문 링크는 그대로 두고, 인라인 키보드 버튼("🔗 신청 페이지 열기")을 함께 붙인다.
 async function sendTelegram(html, opts = {}) {
@@ -315,11 +482,10 @@ async function sendTelegram(html, opts = {}) {
   const text = labelPrefix() + html;
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) {
-    console.warn('[watcher] TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 — 발송 생략');
-    console.log('[미발송 메시지]\n' + text.replace(/<[^>]+>/g, ''));
-    return false;
-  }
+  // 꺼져 있으면 네트워크를 건드리지 않고 즉시 돌아간다.
+  // 매 건 로그를 남기지 않는다 — 꺼 둔 것은 정상이지 사고가 아니다(시작 때 한 줄로 충분).
+  // 알림 자체는 이 함수와 무관하게 log.json 에 남아 홈페이지 '새 소식' 에 뜬다.
+  if (!telegramEnabled() || !token || !chatId) return false;
   try {
     const payload = {
       chat_id: chatId,
@@ -333,22 +499,66 @@ async function sendTelegram(html, opts = {}) {
         inline_keyboard: [[{ text: '🔗 신청 페이지 열기', url: link }]],
       };
     }
-    const res = await fetch(
-      `https://api.telegram.org/bot${token}/sendMessage`,
-      {
+    // 1회 시도. 429 면 { retryAfter } 를 돌려준다.
+    const attempt = async () => {
+      // Node 의 fetch 는 기본 타임아웃이 없다. 연결이 매달리면 영원히 기다리고,
+      // 그 사이 사이클 상한(4분)이 통째로 날아간다 — 수집은 멀쩡한데 실패로 기록된다.
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (e) {
+        return { ok: false, reason: `응답을 읽지 못함 (HTTP ${res.status})` };
       }
-    );
-    const data = await res.json();
-    if (!data.ok) {
-      console.error('[watcher] 텔레그램 발송 실패:', data.description);
+      if (data && data.ok) return { ok: true };
+      if (res.status === 429) {
+        const after = Number(
+          (data && data.parameters && data.parameters.retry_after) != null
+            ? data.parameters.retry_after
+            : 0
+        );
+        return { ok: false, retryAfter: Number.isFinite(after) && after > 0 ? after : 1 };
+      }
+      return { ok: false, reason: (data && data.description) || `HTTP ${res.status}` };
+    };
+
+    let r = await attempt();
+    if (!r.ok && r.retryAfter != null) {
+      // 한도(429)는 '조금 있다 다시 보내라' 는 뜻이라 한 번은 기다렸다 재시도한다.
+      // 다만 무한정 기다리지 않는다 — 상한을 넘기면 이월 큐로 보내는 편이 낫다.
+      const waitMs = Math.min(r.retryAfter * 1000, RETRY_AFTER_CAP_MS);
+      if (r.retryAfter * 1000 > RETRY_AFTER_CAP_MS) {
+        console.warn(
+          `[watcher] 텔레그램 429 — retry_after ${r.retryAfter}초가 상한(${RETRY_AFTER_CAP_MS / 1000}초)을 넘어 포기합니다`
+        );
+        return false;
+      }
+      console.warn(`[watcher] 텔레그램 429 — ${r.retryAfter}초 뒤 1회 재시도합니다`);
+      await sleep(waitMs);
+      r = await attempt();
+      if (!r.ok) {
+        console.error('[watcher] 텔레그램 재시도도 실패:', r.reason || `429(retry_after ${r.retryAfter})`);
+        return false;
+      }
+    }
+    if (!r.ok) {
+      console.error('[watcher] 텔레그램 발송 실패:', r.reason);
       return false;
     }
     return true;
   } catch (err) {
-    console.error('[watcher] 텔레그램 발송 예외:', err.message);
+    // AbortSignal.timeout 은 TimeoutError 를, 네트워크 문제는 TypeError 를 던진다.
+    // 둘 다 여기서 삼키고 false 로 돌려준다 — 알림 실패가 수집 실패로 번지면 안 된다.
+    const why = err && err.name === 'TimeoutError'
+      ? `${SEND_TIMEOUT_MS / 1000}초 안에 응답 없음`
+      : (err && err.message) || String(err);
+    // 토큰이 URL 에 들어 있으므로 err 객체를 통째로 찍지 않는다 (로그에 토큰 유출 금지).
+    console.error('[watcher] 텔레그램 발송 예외:', scrubToken(why));
     return false;
   }
 }
@@ -396,6 +606,17 @@ async function checkOnce({ reason } = {}) {
   const settings = storage.getSettings();
   runtime.lastCheckAt = new Date().toISOString();
 
+  // 이 사이클의 텔레그램 예산을 연다. 이 아래로는 알림이 느리든 실패하든
+  // '수집 실패' 로 세지 않는다 — failStreak 는 scrape/fetchDetails 실패만 센다.
+  beginTelegramCycle();
+
+  // 지난 사이클에서 이월된 알림을 먼저 보낸다. 늦게라도 가는 것이 안 가는 것보다 낫다.
+  try {
+    await flushOutbox();
+  } catch (e) {
+    console.error('[watcher] 이월 큐 처리 실패(무시):', e.message);
+  }
+
   let cards;
   try {
     cards = await scrape();
@@ -414,7 +635,25 @@ async function checkOnce({ reason } = {}) {
     );
     // 3회 연속 실패 시 1회만 텔레그램 경보
     if (consecutiveFailures >= 3 && !failAlertSent) {
-      await sendTelegram('⚠️ <b>새싹 레이더 수집 실패 중</b>\n연속 3회 이상 수집에 실패했습니다.');
+      const r = await sendBudgeted(
+        'failalert:' + consecutiveFailures,
+        '⚠️ <b>새싹 레이더 수집 실패 중</b>\n연속 3회 이상 수집에 실패했습니다.'
+      );
+      // 실패 경보도 '새 소식' 에 남긴다. 텔레그램이 꺼져 있어도 홈페이지에서는 보여야 한다
+      // — 알림이 안 오는 이유가 '수집이 죽어서' 라는 걸 사용자가 알 길이 여기뿐이다.
+      storage.appendLog({
+        at: new Date().toISOString(),
+        kind: 'fail',
+        title: `수집 실패 ${consecutiveFailures}회 연속`,
+        institution: '',
+        status: '',
+        link: '',
+        changes: err.message,
+        sent: r.sent,
+        delivery: r.deferred ? 'deferred' : deliveryOf(true, r.sent),
+      });
+      // 이월됐어도 '보냈다' 로 친다 — 다음 사이클이 대신 보낸다. 안 그러면 매 사이클 중복된다.
+      // 텔레그램이 꺼져 있어도 로그는 한 번만 남겨야 하므로 여기서도 true 로 둔다.
       failAlertSent = true;
     }
     return { ok: false, error: err.message };
@@ -451,7 +690,7 @@ async function checkOnce({ reason } = {}) {
         freshUnknown.map((t) => '• ' + escapeHtml(t)).join('\n') +
         '\n\n알 수 없는 교육대상 분류입니다. <b>미분류</b>로 수집 중이니 ' +
         '레이더 매핑/설정 확인이 필요할 수 있습니다.';
-      const labelSent = await sendTelegram(html);
+      const labelSent = (await sendBudgeted('newlabel:' + freshUnknown.join('|'), html)).sent;
       for (const t of freshUnknown) {
         storage.appendLog({
           at: new Date().toISOString(),
@@ -501,9 +740,13 @@ async function checkOnce({ reason } = {}) {
     const wantSend =
       n.kind === 'start' ? settings.notifyStart : settings.notifyNew;
     let sent = false;
+    let deferred = false;
     if (wantSend) {
       const html = buildMessage(n.kind, n.card);
-      sent = await sendTelegram(html, { link: n.card.link });
+      // 이월 키: 같은 카드의 같은 알림 종류는 두 번 가지 않는다.
+      const r = await sendBudgeted(`${n.kind}:${n.card.id}`, html, { link: n.card.link });
+      sent = r.sent;
+      deferred = r.deferred;
       if (sent) notified += 1;
     }
     storage.appendLog({
@@ -514,7 +757,8 @@ async function checkOnce({ reason } = {}) {
       status: n.card.status,
       link: n.card.link,
       sent,
-      delivery: deliveryOf(wantSend, sent),
+      // 이월된 건은 '실패' 가 아니라 '아직 안 감' 이다. 화면에서 구분되도록 따로 표기한다.
+      delivery: deferred ? 'deferred' : deliveryOf(wantSend, sent),
       // 조건 필드 — 나중에 조건이 바뀌었을 때 이 기록을 다시 판정하려면 필요하다.
       // (기록은 지우지 않는다. 화면에서 걸러 보기 위한 재료일 뿐이다)
       id: n.card.id,
@@ -576,8 +820,14 @@ async function checkOnce({ reason } = {}) {
               `신청 시작: ${escapeHtml(fmtKstDateTime(oldD.applyStartAt) || '미공지')} → ` +
               `<b>${escapeHtml(fmtKstDateTime(newD.applyStartAt) || '미공지')}</b>\n` +
               `${escapeHtml(link)}`;
-            chgSent = await sendTelegram(html, { link });
-            chgDelivery = deliveryOf(true, chgSent);
+            // 이월 키에 바뀐 값을 넣어 둔다 — 같은 변경이 두 번 가지 않게.
+            const chg = await sendBudgeted(
+              `change:${id}:${newD.applyStartAt || ''}`,
+              html,
+              { link }
+            );
+            chgSent = chg.sent;
+            chgDelivery = chg.deferred ? 'deferred' : deliveryOf(true, chgSent);
             const rem = storage.getReminders();
             delete rem[id + ':pre_day'];
             delete rem[id + ':pre_10min'];
@@ -642,6 +892,9 @@ async function checkOnce({ reason } = {}) {
     notified,
     refreshed,
     changed: changeCount,
+    // 알림이 몇 건 이월됐는지. ok 는 그대로 true 다 — 알림 지연은 수집 실패가 아니다.
+    deferred: cycleBudget ? cycleBudget.deferred : 0,
+    telegramBacklog: outboxStatus().pending,
   };
 }
 
@@ -812,4 +1065,12 @@ module.exports = {
   isTelegramConfigured,
   notifyPayload,
   deliveryOf,
+  // 텔레그램 예산·이월 큐 (/health 노출과 테스트에서 쓴다)
+  sendBudgeted,
+  flushOutbox,
+  outboxStatus,
+  beginTelegramCycle,
+  scrubToken,
+  CYCLE_TELEGRAM_BUDGET_MS,
+  SEND_TIMEOUT_MS,
 };

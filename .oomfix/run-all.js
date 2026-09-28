@@ -70,6 +70,9 @@ function run(name, dataDir, env, timeoutMs) {
         TEST_REPO: REPO,
         DATA_DIR: dataDir,
         PORT: String(env.PORT || 3399),
+        // 텔레그램은 이제 선택 기능(기본 꺼짐)이다. 이 검증은 '재기동 전에 알림이
+        // 나가는가' 를 보는 것이므로 여기서는 명시적으로 켜 둔다.
+        NOTIFY_TELEGRAM: '1',
         TELEGRAM_BOT_TOKEN: 'TEST-TOKEN',
         TELEGRAM_CHAT_ID: '99999',
         SCRAPE_TIMEOUT_MS: '5000',

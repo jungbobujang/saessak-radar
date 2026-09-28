@@ -51,8 +51,9 @@ const {
   isTelegramConfigured,
   matchesRecord,
   conditionOf,
+  outboxStatus,
 } = require('./watcher');
-const { withTimeout, closeAllBrowsers } = require('./scraper');
+const { withTimeout, closeAllBrowsers, liveBrowserCount } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -268,6 +269,9 @@ let staleUnlocks = 0;        // 죽은 락을 강제로 푼 누적 횟수
 let pendingManualCheck = false; // 수집 중에 눌린 '즉시 확인' — 끝나면 한 번 이어서 돈다
 let nextTimer = null;        // 다음 주기 예약 타이머 핸들
 let stallAlertedMs = 0;      // 같은 정지 구간에서 텔레그램 도배 방지
+// SIGTERM/SIGINT 이 오면 참이 된다. runCollectCycle 이 이걸 보고 새 사이클을 열지 않는다.
+// (선언을 여기 두는 이유: runCollectCycle 보다 아래에서 let 으로 선언하면 TDZ 에 걸린다)
+let shuttingDown = false;
 
 // 하트비트 — 메모리 사본. 파일(heartbeat.json)과 함께 간다.
 // 재배포·재시작해도 '마지막 확인'이 '확인 전'으로 리셋되지 않게 파일에서 되읽는다.
@@ -321,6 +325,12 @@ function lastActivityMs() {
 // 모든 수집 진입점(정기·시작·수동·워치독)은 이 함수를 통과한다 → 락이 전역으로 걸린다.
 // 어떤 경로로 끝나든(성공·에러·타임아웃) finally 에서 락을 반드시 해제 → 다음 주기 정상 진행.
 async function runCollectCycle(reason) {
+  // 종료 절차가 시작됐으면 새 사이클을 열지 않는다 — 나가는 길에 크로뮴을 새로 띄우면
+  // 그게 그대로 고아가 된다.
+  if (shuttingDown) {
+    console.log(`[scheduler] 종료 중이라 이번 주기(${reason})를 시작하지 않습니다`);
+    return { ok: false, skipped: true, error: '종료 중입니다.' };
+  }
   if (isCollecting) {
     // 락이 언제부터 잡혀 있었는지 본다. 정상 사이클은 길어야 CYCLE_TIMEOUT_MS 안에 끝나므로,
     // STALE_LOCK_MS 를 넘겼다면 그 사이클은 죽은 것이다(프로세스 정지·크롬 hang 등).
@@ -659,6 +669,145 @@ async function selfRestart(kind, reasonText, telegramHtml) {
   setTimeout(() => process.exit(1), 300).unref();
 }
 
+// ---- 프로세스 보호 ----
+//
+// 여기까지 오면 스케줄러·워치독·자가재기동이 갖춰져 있지만, 그 위 계층이 비어 있었다.
+// 처리되지 않은 Promise 거절 하나에 Node 가 기본 동작으로 프로세스를 죽이는데,
+// 그렇게 죽으면 위의 장부(selfRestartsToday·failStreakAtLastRestart)에 아무 기록도
+// 남지 않는다 → 로그상 "이유 없이 사라짐" 이 되고 '하루 3회' 경보도 울리지 않는다.
+//
+// 등록 위치가 selfRestart 정의 바로 뒤인 이유: 핸들러가 heartbeat·restarting·
+// closeAllBrowsers 를 쓰는데, 그보다 앞에서 등록하면 초기화 전에 발화할 때
+// 핸들러 안에서 또 예외가 난다(그게 가장 나쁜 결과다).
+
+// 같은 이유가 1분에 몇 번 났는지 — 폭주할 때만 재기동한다.
+const UNHANDLED_WINDOW_MS = 60000;
+const UNHANDLED_BURST_LIMIT = Number(process.env.UNHANDLED_BURST_LIMIT) || 20;
+const unhandledHits = new Map(); // 이유(첫 줄) -> [발생 시각들]
+let unhandledTotal = 0;
+
+function reasonKey(err) {
+  const msg = err && err.message ? err.message : String(err);
+  return msg.split('\n')[0].slice(0, 200);
+}
+
+process.on('unhandledRejection', (err) => {
+  unhandledTotal += 1;
+  const key = reasonKey(err);
+  const now = Date.now();
+  const hits = (unhandledHits.get(key) || []).filter((t) => now - t < UNHANDLED_WINDOW_MS);
+  hits.push(now);
+  unhandledHits.set(key, hits);
+
+  // 스택을 남긴다 — 이게 없으면 어디서 샜는지 영영 못 찾는다.
+  console.error(
+    `[unhandled] 처리되지 않은 Promise 거절 (#${unhandledTotal}, 최근 1분 ${hits.length}회): ` +
+      ((err && err.stack) || String(err))
+  );
+  // 기록만 남기고 계속 산다. 알림 하나 실패로 감시 전체가 죽는 것이 훨씬 나쁘다.
+  try {
+    const { ymd } = kstParts(now);
+    const todayCount = (heartbeat.unhandledDate === ymd ? heartbeat.unhandledToday || 0 : 0) + 1;
+    beat({
+      unhandledTotal,
+      unhandledDate: ymd,
+      unhandledToday: todayCount,
+      lastUnhandledAt: new Date(now).toISOString(),
+      lastUnhandledReason: key,
+    });
+  } catch (e) {
+    console.error('[unhandled] 기록 실패(무시):', e.message);
+  }
+
+  // 같은 이유가 1분에 한도를 넘으면 그때는 프로세스가 이상해진 것이다 —
+  // 조용히 폭주하게 두지 않고 '정상 재기동 경로' 로 내보낸다(장부에 남는다).
+  if (hits.length > UNHANDLED_BURST_LIMIT && !restarting) {
+    unhandledHits.clear();
+    selfRestart(
+      'unhandled',
+      `같은 이유의 unhandledRejection 이 1분에 ${hits.length}회 (${key})`,
+      '🚨 <b>새싹 레이더 자가 재기동</b>\n' +
+        `처리되지 않은 오류가 1분에 ${hits.length}회 반복되어 프로세스를 다시 시작합니다.\n` +
+        `이유: ${escapeHtml(key)}`
+    ).catch((e) => console.error('[unhandled] 재기동 실패:', e.message));
+  }
+});
+
+process.on('uncaughtException', async (err) => {
+  // 여기까지 온 예외는 이미 어떤 try/catch 도 잡지 못한 것이다. 상태가 성한지 믿을 수 없으니
+  // 살려 두지 않는다. 다만 selfRestart 와 같은 순서로 정리하고 나간다 —
+  // 기록을 먼저 파일에 남기고, 크로뮴을 닫고, exit 1.
+  console.error('[uncaught] 잡히지 않은 예외:', (err && err.stack) || String(err));
+  if (restarting) return;
+  restarting = true;
+  try {
+    beat({
+      lastSelfRestartAt: new Date().toISOString(),
+      lastSelfRestartReason: 'uncaught',
+      lastUncaught: reasonKey(err),
+      selfRestarts: (heartbeat.selfRestarts || 0) + 1,
+    });
+  } catch (e) {
+    console.error('[uncaught] 기록 실패(무시):', e.message);
+  }
+  try {
+    const killed = await closeAllBrowsers('잡히지 않은 예외');
+    if (killed) console.error(`[uncaught] 크로뮴 ${killed}개를 닫았습니다`);
+  } catch (e) {
+    console.error('[uncaught] 브라우저 정리 실패(무시):', e.message);
+  }
+  setTimeout(() => process.exit(1), 300).unref();
+});
+
+// ---- 정상 종료 (재배포·중지) ----
+// Railway 는 재배포 때 SIGTERM 을 보낸다. 지금까지는 핸들러가 없어 즉사했고,
+// 도는 수집이 있으면 크로뮴이 고아로 남을 수 있었다.
+const SHUTDOWN_WAIT_MS = Number(process.env.SHUTDOWN_WAIT_MS) || 20000;
+
+async function gracefulExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true; // runCollectCycle 이 이 플래그를 보고 새 사이클을 시작하지 않는다
+  console.log(`[shutdown] ${signal} 수신 — 새 수집을 멈추고 정리합니다`);
+
+  if (nextTimer) clearTimeout(nextTimer);
+
+  // 도는 수집은 기다려 준다. 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
+  const until = Date.now() + SHUTDOWN_WAIT_MS;
+  while (isCollecting && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (isCollecting) {
+    console.warn(`[shutdown] 수집이 ${SHUTDOWN_WAIT_MS / 1000}초 안에 안 끝나 그대로 정리합니다`);
+  }
+
+  try {
+    const killed = await closeAllBrowsers(`${signal} 종료`);
+    if (killed) console.log(`[shutdown] 크로뮴 ${killed}개를 닫았습니다`);
+  } catch (e) {
+    console.error('[shutdown] 브라우저 정리 실패(무시):', e.message);
+  }
+  try {
+    beat({ lastShutdownAt: new Date().toISOString(), lastShutdownSignal: signal });
+  } catch (e) {
+    console.error('[shutdown] 기록 실패(무시):', e.message);
+  }
+  console.log('[shutdown] 정상 종료합니다 (exit 0)');
+  setTimeout(() => process.exit(0), 200).unref();
+}
+
+process.on('SIGTERM', () => {
+  gracefulExit('SIGTERM').catch((e) => {
+    console.error('[shutdown] 정리 실패:', e.message);
+    process.exit(0);
+  });
+});
+process.on('SIGINT', () => {
+  gracefulExit('SIGINT').catch((e) => {
+    console.error('[shutdown] 정리 실패:', e.message);
+    process.exit(0);
+  });
+});
+
 // ---- ② 연속 실패 자가 재기동 · ③ 하루 3회 초과 경보 ----
 // 수집 락이 풀린 뒤에만 부른다 — 도는 수집을 등 뒤에서 끊으면 크로뮴이 고아로 남는다.
 function maybeSelfRestartOnFailStreak() {
@@ -822,6 +971,7 @@ app.get('/', (req, res) => {
     reminder: '<span class="badge badge-reminder">리마인더</span>',
     change: '<span class="badge badge-change">정보 변경</span>',
     'new-label': '<span class="badge badge-newlabel">새 분류</span>',
+    fail: '<span class="badge badge-fail">수집 실패</span>',
   };
   // ---- 최근 감지: 기록은 그대로, 화면에서만 현재 조건으로 거른다 ----
   //
@@ -857,9 +1007,11 @@ app.get('/', (req, res) => {
         <span class="logtime">${escapeHtml(time)}</span>
         ${gonow}`;
       // 링크 있는 항목: 줄 전체를 새 탭 링크로. 링크 없는 항목(테스트 등)은 클릭 비활성.
+      // data-card-id: '새 소식'에서 /#card=<id> 로 넘어왔을 때 이 줄로 스크롤·강조한다.
+      const cardAttr = l.id ? ` data-card-id="${escapeHtml(l.id)}"` : '';
       return hasLink
-        ? `<a class="logrow logrow-link" data-scope="${scope}" href="${escapeHtml(l.link)}" target="_blank" rel="noopener">${inner}</a>`
-        : `<div class="logrow logrow-disabled" data-scope="${scope}">${inner}</div>`;
+        ? `<a class="logrow logrow-link" data-scope="${scope}"${cardAttr} href="${escapeHtml(l.link)}" target="_blank" rel="noopener">${inner}</a>`
+        : `<div class="logrow logrow-disabled" data-scope="${scope}"${cardAttr}>${inner}</div>`;
     })
     .join('');
 
@@ -3342,24 +3494,74 @@ app.post('/api/test-alert', requireAdmin, async (req, res) => {
 // 브라우저 알림의 '실제 발사 경로'. 대시보드가 이 피드를 주기적으로 읽어
 // 마지막으로 본 시각 이후의 항목을 알림으로 띄운다. 테스트 알림도 같은 로그에
 // 같은 모양(kind:'test')으로 들어가므로 이 경로를 그대로 탄다.
+// 화면의 '새 소식' 과 브라우저 알림이 같이 읽는다.
+//   ?limit=<n>    최대 건수 (기본 20, 상한 200 — 목록 화면은 200 을 쓴다)
+//   ?since=<iso>  이 시각 이후로 생긴 것만
+//   ?kind=<종류>  종류 필터 (start|new|change|new-label|fail, 콤마로 여러 개)
+//   ?q=<글자>     제목·기관 검색
 app.get('/api/notifications', (req, res) => {
   try {
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const since = String(req.query.since || '').trim();
+    const kinds = String(req.query.kind || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const q = String(req.query.q || '').trim().toLowerCase();
+
     // 화면(최근 감지)과 같은 기준으로 거른다. 여기만 안 걸면 목록에서 감춘 항목이
     // 브라우저 알림으로 튀어나온다 — 조건을 바꾼 직후 아직 안 읽은 기록이 그렇다.
     const nSettings = storage.getSettings();
     const nByLink = stateByLink();
-    const items = storage
+    const readAt = storage.getNotificationsReadAt();
+
+    const all = storage
       .getLog()
-      .filter((l) => logScopeOf(l, nSettings, nByLink) !== 'out')
-      .slice(0, limit)
-      .map((l) => ({
-        at: l.at,
-        kind: l.kind,
-        delivery: deliveryLabelKey(l),
-        ...notifyPayload(l),
-      }));
-    res.json({ ok: true, now: new Date().toISOString(), items });
+      // 실패 경보(kind=fail)는 조건 필터의 대상이 아니다 — 조건과 무관한 '시스템 소식' 이다.
+      .filter((l) => l.kind === 'fail' || logScopeOf(l, nSettings, nByLink) !== 'out');
+
+    const filtered = all.filter((l) => {
+      if (since && !(l.at > since)) return false;
+      if (kinds.length && !kinds.includes(l.kind)) return false;
+      if (q) {
+        const hay = `${l.title || ''} ${l.institution || ''} ${l.changes || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const items = filtered.slice(0, limit).map((l) => ({
+      at: l.at,
+      kind: l.kind,
+      delivery: deliveryLabelKey(l),
+      // 읽음 = '모두 읽음' 을 누른 시각보다 이전에 생긴 것
+      read: readAt ? !(l.at > readAt) : false,
+      // 홈 화면의 해당 카드로 이어 주기 위한 열쇠 (아래 #card= 로 쓴다)
+      cardId: l.id || null,
+      ...notifyPayload(l),
+    }));
+
+    // 안 읽은 수는 limit 과 무관하게 전체 기준으로 센다 — 배지가 20 에서 멈추면 안 된다.
+    const unread = readAt ? all.filter((l) => l.at > readAt).length : all.length;
+
+    res.json({
+      ok: true,
+      now: new Date().toISOString(),
+      readAt,
+      unread,
+      total: filtered.length,
+      items,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [모두 읽음]. 지금 시각을 기준선으로 남긴다 (기기가 바뀌어도 따라온다).
+app.post('/api/notifications/read', (req, res) => {
+  try {
+    const at = storage.setNotificationsReadAt(new Date().toISOString());
+    res.json({ ok: true, readAt: at, unread: 0 });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -3473,7 +3675,58 @@ app.get('/api/summary', (req, res) => {
 });
 
 // 프로세스가 살아 있는지만 본다 (keep-alive 핑 대상 · 항상 200).
-app.get('/health', (req, res) => res.send('ok'));
+// 포털 상태 뱃지가 읽는 곳. 예전에는 'ok' 한 글자였는데, 그러면 "살아는 있다" 만 알 수 있고
+// '터지기 전'(이월이 쌓이는 중·크로뮴이 안 닫히는 중·실패가 누적되는 중)은 보이지 않는다.
+// 그래서 바깥에서 한 번에 볼 수 있는 값만 골라 담는다. 형식은 JSON 이지만 ok 필드가 있어
+// 기존처럼 '살았나' 만 보는 쪽도 그대로 쓸 수 있다.
+app.get('/health', (req, res) => {
+  const now = Date.now();
+
+  // 안 읽은 '새 소식' 수. 이 값이 늘기만 하고 안 줄면 아무도 안 보고 있다는 뜻이다.
+  let unread = null;
+  try {
+    const readAt = storage.getNotificationsReadAt();
+    const log = storage.getLog();
+    unread = readAt ? log.filter((l) => l.at > readAt).length : log.length;
+  } catch (e) {
+    console.error('[health] 새 소식 조회 실패(무시):', e.message);
+  }
+
+  let backlog = null;
+  try {
+    backlog = outboxStatus().pending;
+  } catch (e) {
+    console.error('[health] 이월 큐 조회 실패(무시):', e.message);
+  }
+
+  const { ymd } = kstParts(now);
+  res.json({
+    ok: true,
+    uptimeSeconds: Math.floor((now - bootMs) / 1000),
+    lastCycle: {
+      at: heartbeat.lastFinishAt || null,
+      ok: heartbeat.lastOk == null ? null : !!heartbeat.lastOk,
+      ms: heartbeat.lastMs == null ? null : heartbeat.lastMs,
+      reason: heartbeat.lastReason || null,
+      error: heartbeat.lastError || null,
+    },
+    failStreak: heartbeat.failStreak || 0,
+    collecting: isCollecting,
+    unreadNotifications: unread,
+    // 장부에 남아 있는(=아직 못 닫은) 크로뮴. 0 이 아니면 고아가 생기는 중이다.
+    liveBrowsers: liveBrowserCount(),
+    // 오늘치 — 어제 일까지 섞이면 '지금 이상한가' 를 못 읽는다.
+    restartsToday: selfRestartsToday(now),
+    unhandledToday: heartbeat.unhandledDate === ymd ? heartbeat.unhandledToday || 0 : 0,
+    // 누적값도 같이 (추세를 보려면 필요하다)
+    selfRestarts: heartbeat.selfRestarts || 0,
+    unhandledTotal: heartbeat.unhandledTotal || 0,
+    watchdogRestarts: heartbeat.restarts || 0,
+    // 텔레그램을 켠 경우에만 의미가 있다. 꺼져 있으면 0 이다.
+    telegramEnabled: isTelegramConfigured(),
+    telegramBacklog: backlog,
+  });
+});
 
 // 감시 루프가 실제로 도는지 본다. 멈춰 있으면 503 —
 // UptimeRobot 등 외부 모니터를 이 주소로 걸어 두면 감시 정지를 문자로 받을 수 있다.
@@ -3585,7 +3838,8 @@ const DELIVERY_LABEL = {
   sent: { text: '✅ 성공', cls: 'dl-ok', title: '텔레그램 발송 성공' },
   failed: { text: '❌ 실패', cls: 'dl-bad', title: '발송을 시도했으나 실패 (토큰·네트워크·차단)' },
   off: { text: '⏸ 꺼둠', cls: 'dl-off', title: '이 알림 유형이 설정에서 꺼져 있어 발송하지 않음' },
-  unset: { text: '⚙ 미설정', cls: 'dl-off', title: '텔레그램 토큰/챗ID 미설정 — 콘솔에만 출력' },
+  unset: { text: '⚙ 꺼짐', cls: 'dl-off', title: '텔레그램이 꺼져 있거나 토큰/챗ID 미설정 (NOTIFY_TELEGRAM=1 로 켭니다). 알림은 🔔 새 소식에 그대로 쌓입니다' },
+  deferred: { text: '⏳ 이월', cls: 'dl-off', title: '이 사이클의 텔레그램 시간(60초)을 다 써서 다음 사이클로 미뤘음 — 🔔 새 소식에는 이미 올라와 있습니다' },
   none: { text: '· 기록만', cls: 'dl-off', title: '발송 대상이 아닌 기록' },
   unknown: { text: '? 기록 없음', cls: 'dl-off', title: '구버전 로그 — 발송 결과를 저장하지 않던 시절의 기록' },
 };
@@ -3595,6 +3849,7 @@ const KIND_LABEL = {
   reminder: '오픈 리마인더',
   change: '정보 변경',
   'new-label': '새 분류 발견',
+  fail: '수집 실패',
   test: '테스트 발송',
 };
 
@@ -4285,6 +4540,13 @@ function navTabs(active) {
     { key: 'practice', href: '/practice', icon: '🏃', label: '신청 연습' },
     { key: 'settings', href: '/settings', icon: '⚙️', label: '설정' },
   ];
+  // 🔔 새 소식 — 모든 화면 상단에 같은 자리로 둔다. 실제 목록·숫자는 pageShell 의
+  // 공용 스크립트가 /api/notifications 로 채운다(서버 렌더 시점의 숫자는 금방 낡는다).
+  const bell =
+    '<button type="button" class="navlink bell" id="bellBtn" title="새 소식" aria-label="새 소식">' +
+    '<span class="nav-ico">🔔</span>' +
+    '<span class="bell-count" id="bellCount" hidden>0</span>' +
+    '</button>';
   return `<nav class="navlinks">${tabs
     .map(
       (t) =>
@@ -4292,7 +4554,7 @@ function navTabs(active) {
           t.key === active ? ' aria-current="page"' : ''
         } title="${t.label}"><span class="nav-ico">${t.icon}</span><span class="nav-label">${t.label}</span></a>`
     )
-    .join('')}</nav>`;
+    .join('')}${bell}</nav>`;
 }
 
 function pageShell(title, body) {
@@ -4390,6 +4652,54 @@ function pageShell(title, body) {
   .navlink { color:var(--green-d); text-decoration:none; font-weight:600; font-size:14px;
     background:var(--surface-2); padding:8px 12px; border-radius:10px; border:1px solid var(--line);
     white-space:nowrap; }
+
+  /* ---- 🔔 새 소식 ---- */
+  .navlink.bell { position:relative; cursor:pointer; font:inherit; font-weight:600;
+    min-height:38px; min-width:44px; display:inline-flex; align-items:center; justify-content:center; }
+  .navlink.bell:focus-visible { outline:2px solid var(--green-d); outline-offset:1px; }
+  .bell-count { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px;
+    border-radius:999px; background:#e5484d; color:#fff; font-size:11px; font-weight:800;
+    display:inline-flex; align-items:center; justify-content:center; line-height:1; }
+  .notif-back { position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:60; }
+  .notif-panel { position:fixed; z-index:61; background:var(--surface-2); border:1px solid var(--line);
+    border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,.18); display:flex; flex-direction:column;
+    top:64px; right:16px; width:min(420px, calc(100vw - 32px)); max-height:min(70vh, 560px); }
+  /* 폰에서는 아래에서 올라오는 시트로. 좁은 화면에서 오른쪽 구석 팝오버는 누르기 어렵다. */
+  @media (max-width:560px) {
+    .notif-panel { top:auto; bottom:0; right:0; left:0; width:auto; max-height:80vh;
+      border-radius:14px 14px 0 0; }
+  }
+  .notif-head { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .notif-head h3 { margin:0; font-size:15px; flex:1 1 auto; }
+  .notif-tools { display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .notif-tools input[type="search"] { flex:1 1 120px; min-width:0; min-height:36px; padding:0 10px;
+    border:1px solid var(--line); border-radius:9px; background:var(--surface-1); color:var(--ink); font:inherit; font-size:13px; }
+  .notif-kinds { display:flex; gap:6px; padding:0 14px 10px; flex-wrap:wrap; border-bottom:1px solid var(--line); }
+  .notif-kind { border:1px solid var(--line); background:var(--surface-1); color:var(--muted);
+    border-radius:999px; padding:5px 10px; font-size:12px; font-weight:700; cursor:pointer; min-height:32px; }
+  .notif-kind.on { background:var(--green); border-color:var(--green); color:#fff; }
+  .notif-list { overflow-y:auto; padding:6px; margin:0; list-style:none; flex:1 1 auto; }
+  .notif-item { display:block; padding:10px 10px; border-radius:10px; text-decoration:none; color:inherit;
+    border-left:3px solid transparent; }
+  .notif-item:hover { background:var(--surface-1); }
+  .notif-item.fresh .notif-title { font-weight:800; }
+  .notif-item.fresh { border-left-color:var(--green); }
+  .notif-title { font-size:13.5px; line-height:1.4; }
+  .notif-meta { font-size:11.5px; color:var(--muted); margin-top:3px; display:flex; gap:6px; flex-wrap:wrap; }
+  .notif-tag { border-radius:999px; padding:1px 7px; font-weight:700; font-size:11px; }
+  .notif-tag.start { background:#fde8e8; color:#b42318; }
+  .notif-tag.new { background:#fdf3d8; color:#8a6400; }
+  .notif-tag.change { background:#e7eefc; color:#1b4ea8; }
+  .notif-tag.new-label { background:#eee7fc; color:#5b2aa8; }
+  .notif-tag.fail { background:#f1f1f1; color:#555; }
+  .notif-empty { padding:28px 14px; text-align:center; color:var(--muted); font-size:13px; }
+  /* 알림에서 넘어온 카드를 잠깐 강조한다 */
+  .card-flash { animation: cardFlash 2.4s ease-out 1; }
+  @keyframes cardFlash {
+    0%, 60% { box-shadow:0 0 0 3px var(--green); }
+    100% { box-shadow:0 0 0 0 transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) { .card-flash { animation:none; outline:3px solid var(--green); } }
   .navlink:hover { background:var(--surface-1); }
   /* 상단 탭 묶음 — 좁은 화면에서는 제목 아래로 접힌다 */
   .navlinks { display:flex; align-items:center; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
@@ -4452,6 +4762,7 @@ function pageShell(title, body) {
   .badge-new { background:#fff6e6; color:#c98a00; }
   .badge-test { background:#f0e9fb; color:#7c3aed; }
   .badge-newlabel { background:#e6f0ff; color:#1d4ed8; }
+  .badge-fail { background:#f1f1f1; color:#555; }
   .planner { border-color:#d7ebdf; }
   .plan-group { margin-top:6px; }
   .plan-group + .plan-group { margin-top:16px; border-top:1px dashed var(--line); padding-top:12px; }
@@ -5178,6 +5489,203 @@ function pageShell(title, body) {
 
       return { fireNotification: fireNotification, toast: toast, permission: permission };
     })();
+
+    // ---- 🔔 새 소식 ----
+    // 알림의 본래 자리. 텔레그램을 꺼 두어도(기본값) 여기에는 전부 쌓인다.
+    // 서버가 '모두 읽음' 시각을 들고 있고(기기가 바뀌어도 따라옴), 브라우저는
+    // '마지막으로 목록을 본 시각'을 따로 기억해 그 뒤에 생긴 것만 굵게 보여 준다.
+    function initBell() {
+      var btn = document.getElementById('bellBtn');
+      if (!btn) return;
+      var countEl = document.getElementById('bellCount');
+      var SEEN_KEY = 'saessak:notifSeenAt';
+      var POLL_MS = 60000;
+      var panel = null, back = null;
+      var kind = '';   // '' = 전체
+      var q = '';
+      var KINDS = [
+        ['', '전체'], ['start', '모집 시작'], ['new', '새 프로그램'],
+        ['change', '정보 변경'], ['new-label', '새 분류'], ['fail', '수집 실패']
+      ];
+
+      function seenAt() { try { return localStorage.getItem(SEEN_KEY) || ''; } catch (e) { return ''; } }
+      function markSeen(at) { try { if (at) localStorage.setItem(SEEN_KEY, at); } catch (e) {} }
+
+      function setBadge(n) {
+        if (!countEl) return;
+        if (n > 0) { countEl.textContent = n > 99 ? '99+' : String(n); countEl.hidden = false; }
+        else { countEl.hidden = true; }
+        btn.setAttribute('aria-label', n > 0 ? ('새 소식 ' + n + '건') : '새 소식');
+      }
+
+      async function refreshBadge() {
+        try {
+          var r = await fetch('/api/notifications?limit=1', { cache: 'no-store' });
+          if (!r.ok) return;
+          var d = await r.json();
+          setBadge(d.unread || 0);
+        } catch (e) { /* 다음 주기에 다시 */ }
+      }
+
+      function fmtWhen(iso) {
+        var t = Date.parse(iso);
+        if (isNaN(t)) return '';
+        var diff = Date.now() - t;
+        if (diff < 60000) return '방금';
+        if (diff < 3600000) return Math.floor(diff / 60000) + '분 전';
+        if (diff < 86400000) return Math.floor(diff / 3600000) + '시간 전';
+        return new Date(t).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' });
+      }
+
+      function kindLabel(k) {
+        for (var i = 0; i < KINDS.length; i++) if (KINDS[i][0] === k) return KINDS[i][1];
+        return k || '알림';
+      }
+
+      async function loadList() {
+        var list = panel.querySelector('#notifList');
+        list.innerHTML = '<li class="notif-empty">불러오는 중…</li>';
+        var url = '/api/notifications?limit=200';
+        if (kind) url += '&kind=' + encodeURIComponent(kind);
+        if (q) url += '&q=' + encodeURIComponent(q);
+        var d;
+        try {
+          var r = await fetch(url, { cache: 'no-store' });
+          d = await r.json();
+        } catch (e) {
+          list.innerHTML = '<li class="notif-empty">불러오지 못했습니다.</li>';
+          return;
+        }
+        var items = d.items || [];
+        setBadge(d.unread || 0);
+        if (!items.length) {
+          list.innerHTML = '<li class="notif-empty">' +
+            (q || kind ? '조건에 맞는 소식이 없습니다.' : '아직 새 소식이 없습니다.') + '</li>';
+          return;
+        }
+        var since = seenAt();
+        list.innerHTML = '';
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          var li = document.createElement('li');
+          var a = document.createElement('a');
+          a.className = 'notif-item' + (since && it.at > since ? ' fresh' : (!since ? ' fresh' : ''));
+          // 링크가 있으면 새 창, 없으면 홈의 해당 카드로.
+          if (it.link) { a.href = it.link; a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+          else if (it.cardId) { a.href = '/#card=' + encodeURIComponent(it.cardId); }
+          else { a.href = '#'; }
+          var t = document.createElement('div');
+          t.className = 'notif-title';
+          t.textContent = it.title || '(제목 없음)';
+          var m = document.createElement('div');
+          m.className = 'notif-meta';
+          var tag = document.createElement('span');
+          tag.className = 'notif-tag ' + (it.kind || '');
+          tag.textContent = kindLabel(it.kind);
+          m.appendChild(tag);
+          var when = document.createElement('span');
+          when.textContent = fmtWhen(it.at);
+          m.appendChild(when);
+          if (it.body) { var b = document.createElement('span'); b.textContent = it.body; m.appendChild(b); }
+          a.appendChild(t); a.appendChild(m);
+          li.appendChild(a);
+          list.appendChild(li);
+        }
+        // 목록을 본 시각을 기준선으로 남긴다(가장 최근 항목 기준).
+        if (items[0] && items[0].at) markSeen(items[0].at);
+      }
+
+      function close() {
+        if (back) { back.remove(); back = null; }
+        if (panel) { panel.remove(); panel = null; }
+        btn.setAttribute('aria-expanded', 'false');
+      }
+
+      function open() {
+        if (panel) { close(); return; }
+        back = document.createElement('div');
+        back.className = 'notif-back';
+        back.addEventListener('click', close);
+        document.body.appendChild(back);
+
+        panel = document.createElement('div');
+        panel.className = 'notif-panel';
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-label', '새 소식');
+        panel.innerHTML =
+          '<div class="notif-head"><h3>새 소식</h3>' +
+          '<button type="button" class="notif-kind" id="notifReadAll">모두 읽음</button>' +
+          '<button type="button" class="notif-kind" id="notifClose" aria-label="닫기">✕</button></div>' +
+          '<div class="notif-tools"><input type="search" id="notifQ" placeholder="제목·기관 검색" autocomplete="off"></div>' +
+          '<div class="notif-kinds" id="notifKinds"></div>' +
+          '<ul class="notif-list" id="notifList"></ul>';
+        document.body.appendChild(panel);
+        btn.setAttribute('aria-expanded', 'true');
+
+        var kinds = panel.querySelector('#notifKinds');
+        KINDS.forEach(function (k) {
+          var b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'notif-kind' + (k[0] === kind ? ' on' : '');
+          b.textContent = k[1];
+          b.addEventListener('click', function () {
+            kind = k[0];
+            kinds.querySelectorAll('.notif-kind').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            loadList();
+          });
+          kinds.appendChild(b);
+        });
+
+        var qInput = panel.querySelector('#notifQ');
+        var timer = null;
+        qInput.addEventListener('input', function () {
+          clearTimeout(timer);
+          timer = setTimeout(function () { q = qInput.value.trim(); loadList(); }, 250);
+        });
+        qInput.value = q;
+
+        panel.querySelector('#notifClose').addEventListener('click', close);
+        panel.querySelector('#notifReadAll').addEventListener('click', async function () {
+          try {
+            await fetch('/api/notifications/read', { method: 'POST' });
+            setBadge(0);
+            markSeen(new Date().toISOString());
+            var fresh = panel.querySelectorAll('.notif-item.fresh');
+            for (var i = 0; i < fresh.length; i++) fresh[i].classList.remove('fresh');
+          } catch (e) { saessak.toast('읽음 처리에 실패했습니다.'); }
+        });
+
+        loadList();
+      }
+
+      btn.addEventListener('click', open);
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+
+      refreshBadge();
+      setInterval(refreshBadge, POLL_MS);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshBadge(); });
+
+      // 알림에서 '/#card=<id>' 로 넘어온 경우 해당 카드로 스크롤하고 잠깐 강조한다.
+      (function () {
+        var m = /[#&]card=([^&]+)/.exec(location.hash || '');
+        if (!m) return;
+        var id = decodeURIComponent(m[1]);
+        var el = document.querySelector('[data-card-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+        if (!el) return;
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        el.classList.add('card-flash');
+        setTimeout(function () { el.classList.remove('card-flash'); }, 2600);
+      })();
+    }
+
+    // 이 <script> 는 본문(.wrap)보다 먼저 실행된다 — 지금 getElementById 를 하면 null 이다.
+    // 그래서 DOM 이 다 준비된 뒤에 붙인다.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initBell);
+    } else {
+      initBell();
+    }
   </script>
   <div class="wrap">${body}</div>
 </body>
